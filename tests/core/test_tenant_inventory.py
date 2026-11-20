@@ -17,6 +17,19 @@ EXPECTED_TENANT_TABLES = {
     "ai_routing_feedback",
     "tenant_ai_model_policy",
     "sys_user",
+    "sys_field_policy_head",
+    "sys_field_policy_object_state",
+    "sys_field_policy_revision",
+    "sys_field_policy_binding",
+    "sys_field_policy_manifest",
+    "sys_field_policy_manifest_item",
+    "sys_field_policy_audit",
+    "sys_field_policy_request",
+    "sys_field_policy_migration_map",
+    "sys_user_field_policy_state",
+    "sys_user_field_policy_revision",
+    "sys_user_field_policy_binding",
+    "sys_user_field_policy_audit",
     "sys_role",
     "sys_dept",
     "sys_menu",
@@ -26,6 +39,7 @@ EXPECTED_TENANT_TABLES = {
     "sys_role_dept",
     "role_ai_agent",
     "sys_config",
+    "sys_config_publication",
     "sys_setting",
     "sys_dict_type",
     "sys_dict_data",
@@ -80,6 +94,34 @@ def test_platform_global_models_do_not_reuse_tenant_zero_as_global_scope():
 def test_platform_identity_and_audit_are_explicit_global_resources():
     assert "sys_platform_principal" in PLATFORM_GLOBAL_TABLES
     assert "sys_platform_audit_log" in PLATFORM_GLOBAL_TABLES
+
+
+def test_field_policy_inventory_preserves_role_and_revision_boundaries():
+    guard = PLATFORM_GLOBAL_TABLES["sys_user_field_policy_global_guard"]
+    assert guard.identity_column == "guard_id"
+    expected = {
+        "sys_user_field_policy_state": ((("tenant_id",),), ()),
+        "sys_user_field_policy_revision": (
+            (
+                ("tenant_id", "role_id", "revision_no"),
+                ("tenant_id", "role_id", "revision_id"),
+            ),
+            (("tenant_id", "role_id"),),
+        ),
+        "sys_user_field_policy_binding": (
+            (("tenant_id", "role_id"),),
+            (("tenant_id", "role_id"), ("tenant_id", "role_id", "revision_id")),
+        ),
+        "sys_user_field_policy_audit": (
+            (),
+            (("tenant_id", "role_id", "revision_id"),),
+        ),
+    }
+    for table_name, (unique_keys, relationship_keys) in expected.items():
+        resource = TENANT_MODEL_INVENTORY[table_name]
+        assert resource.nullability is TenantNullability.REQUIRED
+        assert resource.unique_keys == unique_keys
+        assert resource.relationship_keys == relationship_keys
 
 
 def test_marketplace_tables_are_explicitly_hosted_contained() -> None:

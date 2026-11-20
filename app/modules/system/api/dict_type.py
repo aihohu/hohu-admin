@@ -2,26 +2,29 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_permissions
-from app.core.base_response import PageResult, ResponseModel
+from app.core.base_response import ResponseModel
 from app.core.tenant import TenantContext
+from app.db.authorization_http import business_read, business_write
 from app.db.session import get_db
 from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.user import User
 from app.modules.system.schemas.dict_type import (
     DictTypeCreate,
-    DictTypeOut,
     DictTypeQuery,
-    DictTypeSimpleOut,
     DictTypeUpdate,
 )
-from app.modules.system.service.dict_type_service import dict_type_service
+from app.modules.system.schemas.ordinary_projection import (
+    DictTypeProjection,
+    OrdinaryPage,
+)
 
 router = APIRouter()
 
 
 @router.get(
     "/list",
-    response_model=ResponseModel[PageResult[DictTypeOut]],
+    response_model=ResponseModel[OrdinaryPage[DictTypeProjection]],
+    response_model_exclude_unset=True,
     summary="获取字典类型列表分页",
     description="根据查询条件获取字典类型分页列表，支持按字典名称和字典类型筛选",
     responses={
@@ -55,13 +58,16 @@ async def get_list(
         - dict_type: 字典类型（支持模糊查询）
         - status: 字典类型状态（1-启用，2-禁用）
     """
-    page_data = await dict_type_service.get_list(db, query, tenant=tenant)
+    page_data = await business_read(
+        db, _current_user, tenant=tenant, operation="dict-type.list", query=query
+    )
     return ResponseModel.success(data=page_data)
 
 
 @router.get(
     "/all",
-    response_model=ResponseModel[list[DictTypeSimpleOut]],
+    response_model=ResponseModel[list[DictTypeProjection]],
+    response_model_exclude_unset=True,
     summary="获取全部字典类型列表(不分页)",
     description="获取系统中所有已启用的字典类型列表，不分页，用于下拉选择等场景",
     responses={
@@ -90,12 +96,15 @@ async def get_all(
         - 不分页，返回所有符合条件的字典类型
         - 适合用于前端下拉选择框
     """
-    dict_types = await dict_type_service.get_all_enabled(db, tenant=tenant)
+    dict_types = await business_read(
+        db, _current_user, tenant=tenant, operation="dict-type.options"
+    )
     return ResponseModel.success(data=dict_types)
 
 
 @router.post(
     "/add",
+    response_model_exclude_unset=True,
     summary="创建字典类型",
     description="创建新的字典类型，包括字典名称、编码和描述信息",
     responses={
@@ -129,13 +138,15 @@ async def add(
         - remark: 字典描述（可选，最大500字符）
         - status: 字典类型状态（必填，1-启用，2-禁用）
     """
-    await dict_type_service.create(db, type_in, tenant=tenant)
-    await db.commit()
+    await business_write(
+        db, _current_user, tenant=tenant, operation="dict-type.create", payload=type_in
+    )
     return ResponseModel.success(msg="字典类型创建成功")
 
 
 @router.put(
     "/{type_id}",
+    response_model_exclude_unset=True,
     summary="编辑字典类型信息",
     description="更新指定字典类型的基本信息",
     responses={
@@ -175,13 +186,20 @@ async def update(
         - remark: 字典描述
         - status: 字典类型状态
     """
-    await dict_type_service.update(db, type_id, type_in, tenant=tenant)
-    await db.commit()
+    await business_write(
+        db,
+        _current_user,
+        tenant=tenant,
+        operation="dict-type.update",
+        payload=type_in,
+        ids=(type_id,),
+    )
     return ResponseModel.success(msg="字典类型更新成功")
 
 
 @router.delete(
     "/{type_id}",
+    response_model_exclude_unset=True,
     summary="删除指定字典类型",
     description="删除指定的单个字典类型",
     responses={
@@ -217,13 +235,15 @@ async def delete(
         - 此操作不可逆，请谨慎操作
         - 如果字典类型下存在数据，则无法删除
     """
-    await dict_type_service.delete(db, type_id, tenant=tenant)
-    await db.commit()
+    await business_write(
+        db, _current_user, tenant=tenant, operation="dict-type.delete", ids=(type_id,)
+    )
     return ResponseModel.success(msg="字典类型删除成功")
 
 
 @router.post(
     "/batch-delete",
+    response_model_exclude_unset=True,
     summary="批量删除字典类型",
     description="批量删除多个字典类型",
     responses={
@@ -257,6 +277,7 @@ async def batch_delete(
     Note:
         - 如果任一字典类型下存在数据，则全部删除失败
     """
-    count = await dict_type_service.batch_delete(db, ids, tenant=tenant)
-    await db.commit()
+    count = await business_write(
+        db, _current_user, tenant=tenant, operation="dict-type.batch-delete", ids=ids
+    )
     return ResponseModel.success(msg=f"成功删除 {count} 个字典类型")

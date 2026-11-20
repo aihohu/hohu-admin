@@ -26,6 +26,56 @@ label 命名遵循 Prometheus 最佳实践：
 
 from prometheus_client import Counter, Gauge, Histogram
 
+from app.modules.system.field_policy.delivery_catalog import TOOL_OBJECTS
+
+_TOOLS = frozenset(TOOL_OBJECTS)
+_STATUSES = frozenset(
+    {
+        "success",
+        "failed",
+        "rejected",
+        "hitl_approved",
+        "hitl_rejected",
+        "hitl_expired",
+        "not_found",
+        "agent_mismatch",
+        "prepared_action_required",
+        "invalid_prepared_outcome",
+        "perm_denied",
+        "super_admin_required",
+        "quota_rejected",
+        "redis_down",
+        "internal_error",
+        "repeated_failure",
+    }
+)
+_RISKS = frozenset({"low", "high", "destructive"})
+_EXECUTION_MODES = frozenset({"autonomous", "hitl"})
+_HITL_MODES = frozenset({"memory", "redis_pubsub"})
+_WAKE_RESULTS = frozenset({"success", "not_found"})
+_QUOTA_LEVELS = frozenset({"l1_rate", "l1_global_rate", "l2_daily", "l2_agent"})
+_SECURITY_EVENTS = frozenset(
+    {
+        "injection",
+        "keyword",
+        "forbidden_topic",
+        "forbidden_url",
+        "auto_disable",
+        "ip_blacklist",
+        "provider_egress_blocked",
+    }
+)
+
+
+def _label(value: object, allowed: frozenset[str]) -> str:
+    """Publish code-owned diagnostics, never stringify caller-controlled data."""
+    return (
+        value
+        if type(value) is str and len(value) <= 128 and value in allowed
+        else "unknown"
+    )
+
+
 # ============ 核心工具调用 ============
 
 TOOL_CALLS_TOTAL = Counter(
@@ -96,6 +146,10 @@ def record_tool_call(
         execution_mode: autonomous / hitl
         duration_sec: 墙钟耗时（含 HITL 等待），由调用方 monotonic 测量
     """
+    tool = _label(tool, _TOOLS)
+    status = _label(status, _STATUSES)
+    risk = _label(risk, _RISKS)
+    execution_mode = _label(execution_mode, _EXECUTION_MODES)
     TOOL_CALLS_TOTAL.labels(
         tool=tool, status=status, risk=risk, execution_mode=execution_mode
     ).inc()
@@ -104,12 +158,12 @@ def record_tool_call(
 
 def record_hitl_created(mode: str) -> None:
     """HITL 挂起创建（create_pending 后调）"""
-    HITL_PENDING_COUNT.labels(mode=mode).inc()
+    HITL_PENDING_COUNT.labels(mode=_label(mode, _HITL_MODES)).inc()
 
 
 def record_hitl_resolved(mode: str) -> None:
     """HITL 挂起解决（hang 返回 / 超时 / 异常后调，必须配对调）"""
-    HITL_PENDING_COUNT.labels(mode=mode).dec()
+    HITL_PENDING_COUNT.labels(mode=_label(mode, _HITL_MODES)).dec()
 
 
 def record_hitl_wake(mode: str, result: str) -> None:
@@ -119,7 +173,9 @@ def record_hitl_wake(mode: str, result: str) -> None:
         mode: memory / redis_pubsub
         result: success / not_found
     """
-    HITL_WAKE_TOTAL.labels(mode=mode, result=result).inc()
+    HITL_WAKE_TOTAL.labels(
+        mode=_label(mode, _HITL_MODES), result=_label(result, _WAKE_RESULTS)
+    ).inc()
 
 
 def record_hitl_pubsub_lost() -> None:
@@ -134,7 +190,7 @@ def record_hitl_pubsub_lost() -> None:
 
 def record_hitl_timeout(mode: str) -> None:
     """HITL hang 5min TTL 超时"""
-    HITL_TIMEOUT_TOTAL.labels(mode=mode).inc()
+    HITL_TIMEOUT_TOTAL.labels(mode=_label(mode, _HITL_MODES)).inc()
 
 
 def record_quota_rejected(level: str) -> None:
@@ -143,7 +199,7 @@ def record_quota_rejected(level: str) -> None:
     Args:
         level: l1_rate（用户写速率）/ l2_daily（用户日配额）
     """
-    QUOTA_REJECTED_TOTAL.labels(level=level).inc()
+    QUOTA_REJECTED_TOTAL.labels(level=_label(level, _QUOTA_LEVELS)).inc()
 
 
 def record_security_event(event_type: str) -> None:
@@ -152,4 +208,4 @@ def record_security_event(event_type: str) -> None:
     Args:
         event_type: injection / keyword / auto_disable / ip_blacklist
     """
-    SECURITY_EVENTS_TOTAL.labels(event_type=event_type).inc()
+    SECURITY_EVENTS_TOTAL.labels(event_type=_label(event_type, _SECURITY_EVENTS)).inc()

@@ -9,6 +9,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -27,8 +28,16 @@ class DictData(Base):
             ("sys_dict_type.tenant_id", "sys_dict_type.dict_type"),
             name="fk_sys_dict_data_tenant_type",
             ondelete="RESTRICT",
+            onupdate="CASCADE",
         ),
         Index("ix_sys_dict_data_tenant_type", "tenant_id", "dict_type"),
+        Index(
+            "uq_sys_dict_data_one_default",
+            "tenant_id",
+            "dict_type",
+            unique=True,
+            postgresql_where=text("is_default = 'Y'"),
+        ),
     )
 
     dict_code: Mapped[int] = mapped_column(

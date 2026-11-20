@@ -31,12 +31,12 @@ class OperationLogOut(BaseModel):
 
     operation_log_id: int
     user_id: int
-    username: str
+    username: str | None = None
     module: str
     action: str
     method: str
     path: str
-    request_params: str | None
+    request_params: str | None = None
     status_code: int | None
     ip: str | None
     duration: int | None

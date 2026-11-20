@@ -8,6 +8,12 @@ on:
         type: string
         required: false
         default: ''
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full application commit for read-only source compatibility verification
+        type: string
+        required: true
   push:
     branches: [main, master, 'release/*']
   pull_request:
@@ -16,11 +22,25 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.repository }}-${{ github.event_name == 'pull_request' && inputs.source_sha == '' && !(startsWith(github.event.pull_request.head.ref, 'release/') && contains(fromJSON('["main","master"]'), github.event.pull_request.base.ref)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && inputs.source_sha == '' && !(startsWith(github.event.pull_request.head.ref, 'release/') && contains(fromJSON('["main","master"]'), github.event.pull_request.base.ref)) }}
+
 jobs:
   ruff:
-    name: Ruff
+    name: ${{ github.event_name == 'workflow_dispatch' && github.workflow == 'CI' && 'Selected source / ' || '' }}Ruff
     runs-on: ubuntu-latest
     steps:
+      - name: Validate pinned source input
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == workflow_dispatch || -n "$SOURCE_SHA" ]]; then
+            [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          fi
+
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.source_sha || github.sha }}
@@ -52,10 +72,13 @@ jobs:
       - name: Check public documentation
         run: uv run python -m tools.checks.check_docs
 
-  pytest:
-    name: Pytest (Python ${{ matrix.python-version }})
+  test-plan:
+    name: Test inventory (Python ${{ matrix.python-version }})
+    if: inputs.source_sha == ''
+    needs: ruff
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         # pyproject.toml declares requires-python = ">=3.12"
         python-version: ["3.12", "3.13", "3.14"]
@@ -84,6 +107,7 @@ jobs:
           --health-retries 10
     env:
       ENV: test
+      UV_PYTHON: ${{ matrix.python-version }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -123,12 +147,333 @@ jobs:
             HOHU_ADMIN_PASSWORD=CiSeed123456 uv run python -m scripts.init_db
           fi
 
-      - name: Run Tests
-        run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=70
+      - name: Check transfer HTTP contracts before the full gate
+        run: |
+          set -euo pipefail
+          COVERAGE_FILE="${RUNNER_TEMP}/transfer-contract.coverage" \
+          uv run coverage run --source=app -m pytest \
+            tests/core/test_opaque_field_identity.py \
+            tests/modules/system/test_generic_transfer_http.py \
+            --basetemp "${RUNNER_TEMP}/transfer-contract" \
+            -o "cache_dir=${RUNNER_TEMP}/transfer-contract-cache"
+
+      - name: Collect full inventory and plan file groups
+        run: |
+          set -euo pipefail
+          uv run python -m tools.ci.sharding collect --output "${RUNNER_TEMP}/collection"
+          uv run python -m tools.ci.sharding plan \
+            --input "${RUNNER_TEMP}/collection/report.json" \
+            --history tools/ci/file-durations.json --groups 4 \
+            --output "${RUNNER_TEMP}/ci-plan/plan.json"
+
+      - name: Upload complete version inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: plan-${{ matrix.python-version }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-plan/plan.json
+          if-no-files-found: error
+          retention-days: 14
+
+  test-shards:
+    name: Test group (Python ${{ matrix.python-version }}, ${{ matrix.group }})
+    if: inputs.source_sha == ''
+    needs: test-plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # pyproject.toml declares requires-python = ">=3.12"
+        python-version: ["3.12", "3.13", "3.14"]
+        group: [0, 1, 2, 3]
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: pancake
+          POSTGRES_PASSWORD: mypassword
+          POSTGRES_DB: hohu_admin
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pancake -d hohu_admin"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ENV: test
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.10.11"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --locked --all-extras --dev
+
+      - name: Load test environment
+        # alembic env.py + app config read via load_dotenv(); .env.test has the
+        # service coordinates (pancake/mypassword@localhost:5432/hohu_admin) and
+        # no real secrets, so we copy it to .env for the CI run.
+        run: cp .env.test .env
+
+      - name: Initialize the selected source in the ephemeral test database
+        run: |
+          set -euo pipefail
+          uv run alembic upgrade head
+          if [[ -f tests/release/bootstrap_database.py ]]; then
+            RELEASE_BUILD_SHA="$(git rev-parse HEAD)" \
+            HOHU_TEST_DATABASE_EPHEMERAL=true \
+            AUTHORIZATION_MAINTENANCE_PASSWORD=CiSeed123456 \
+            uv run python -m tests.release.bootstrap_database \
+              --build-sha "$(git rev-parse HEAD)" \
+              --control-dir "${RUNNER_TEMP}/pytest-bootstrap"
+          else
+            HOHU_ADMIN_PASSWORD=CiSeed123456 uv run python -m scripts.init_db
+          fi
+
+      - name: Download this version's complete plan
+        uses: actions/download-artifact@v4
+        with:
+          name: plan-${{ matrix.python-version }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-plan
+
+      - name: Run the complete assigned files
+        run: |
+          uv run python -m tools.ci.sharding run \
+            --plan "${RUNNER_TEMP}/ci-plan/plan.json" --group "${{ matrix.group }}" \
+            --output "${RUNNER_TEMP}/shard"
+
+      - name: Save group evidence including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.python-version }}-${{ matrix.group }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/shard/report.json
+            ${{ runner.temp }}/shard/junit.xml
+            ${{ runner.temp }}/shard/coverage.data
+            ${{ runner.temp }}/shard/coverage.toml
+            ${{ runner.temp }}/shard/pytest.log
+          if-no-files-found: error
+          retention-days: 14
+
+  pinned-tests:
+    name: Pinned source tests (Python ${{ matrix.python-version }})
+    if: inputs.source_sha != ''
+    needs: ruff
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # pyproject.toml declares requires-python = ">=3.12"
+        python-version: ["3.12", "3.13", "3.14"]
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: pancake
+          POSTGRES_PASSWORD: mypassword
+          POSTGRES_DB: hohu_admin
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pancake -d hohu_admin"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ENV: test
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.10.11"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --locked --all-extras --dev
+
+      - name: Load test environment
+        # alembic env.py + app config read via load_dotenv(); .env.test has the
+        # service coordinates (pancake/mypassword@localhost:5432/hohu_admin) and
+        # no real secrets, so we copy it to .env for the CI run.
+        run: cp .env.test .env
+
+      - name: Initialize the selected source in the ephemeral test database
+        run: |
+          set -euo pipefail
+          uv run alembic upgrade head
+          if [[ -f tests/release/bootstrap_database.py ]]; then
+            RELEASE_BUILD_SHA="$(git rev-parse HEAD)" \
+            HOHU_TEST_DATABASE_EPHEMERAL=true \
+            AUTHORIZATION_MAINTENANCE_PASSWORD=CiSeed123456 \
+            uv run python -m tests.release.bootstrap_database \
+              --build-sha "$(git rev-parse HEAD)" \
+              --control-dir "${RUNNER_TEMP}/pytest-bootstrap"
+          else
+            HOHU_ADMIN_PASSWORD=CiSeed123456 uv run python -m scripts.init_db
+          fi
+
+      - name: Check selected source transfer contracts when present
+        run: |
+          set -euo pipefail
+          if [[ -f tests/core/test_opaque_field_identity.py || -f tests/modules/system/test_generic_transfer_http.py ]]; then
+            COVERAGE_FILE="${RUNNER_TEMP}/transfer-contract.coverage" \
+            uv run coverage run --source=app -m pytest \
+              tests/core/test_opaque_field_identity.py tests/modules/system/test_generic_transfer_http.py \
+              --basetemp "${RUNNER_TEMP}/transfer-contract" -o "cache_dir=${RUNNER_TEMP}/transfer-contract-cache"
+          else
+            echo "This selected source predates the transfer contract modules; its complete suite follows."
+          fi
+
+      - name: Run the selected source complete suite and coverage gate
+        env:
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/pinned"
+          [[ "$(git rev-parse HEAD)" == "$REQUESTED_SOURCE_SHA" ]]
+          uv run python - <<'PY'
+          import json, os, platform, subprocess
+          from pathlib import Path
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          record = {'sha': git('rev-parse', 'HEAD'), 'tree': git('rev-parse', 'HEAD^{tree}'),
+                    'python': platform.python_version(), 'run': os.environ['GITHUB_RUN_ID'],
+                    'attempt': os.environ['GITHUB_RUN_ATTEMPT']}
+          Path(os.environ['RUNNER_TEMP'], 'pinned', 'source.json').write_text(json.dumps(record))
+          PY
+          COVERAGE_FILE="${RUNNER_TEMP}/pinned/coverage.data" \
+          uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=70 --durations=30 \
+            --junitxml "${RUNNER_TEMP}/pinned/junit.xml" \
+            --basetemp "${RUNNER_TEMP}/pytest-full" -o "cache_dir=${RUNNER_TEMP}/pytest-cache"
+
+      - name: Save selected source evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pinned-${{ matrix.python-version }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pinned/
+          if-no-files-found: error
+          retention-days: 14
+
+  pytest:
+    name: ${{ github.event_name == 'workflow_dispatch' && github.workflow == 'CI' && 'Selected source / ' || '' }}Pytest (Python ${{ matrix.python-version }})
+    if: always()
+    needs: [test-plan, test-shards, pinned-tests]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+      SELECTED_SOURCE: ${{ inputs.source_sha }}
+      PLAN_RESULT: ${{ needs.test-plan.result }}
+      GROUP_RESULT: ${{ needs.test-shards.result }}
+      PINNED_RESULT: ${{ needs.pinned-tests.result }}
+    steps:
+      - name: Require every dependency to succeed
+        run: |
+          set -euo pipefail
+          if [[ -n "$SELECTED_SOURCE" ]]; then
+            [[ "$PINNED_RESULT" == success ]]
+          else
+            [[ "$PLAN_RESULT" == success && "$GROUP_RESULT" == success ]]
+          fi
+
+      - uses: actions/checkout@v6
+        if: inputs.source_sha == ''
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install uv
+        if: inputs.source_sha == ''
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.10.11"
+          enable-cache: true
+
+      - name: Set up Python
+        if: inputs.source_sha == ''
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        if: inputs.source_sha == ''
+        run: uv sync --locked --all-extras --dev
+
+      - name: Download this version's complete plan
+        if: inputs.source_sha == ''
+        uses: actions/download-artifact@v4
+        with:
+          name: plan-${{ matrix.python-version }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-plan
+
+      - name: Download this version's group evidence
+        if: inputs.source_sha == ''
+        uses: actions/download-artifact@v4
+        with:
+          pattern: shard-${{ matrix.python-version }}-*-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-groups
+
+      - name: Verify complete execution and combined branch coverage
+        if: inputs.source_sha == ''
+        run: |
+          uv run python -m tools.ci.sharding aggregate \
+            --plan "${RUNNER_TEMP}/ci-plan/plan.json" --input "${RUNNER_TEMP}/ci-groups" \
+            --dependency "$GROUP_RESULT" --output "${RUNNER_TEMP}/combined"
+
+      - name: Upload verified coverage and summary
+        if: ${{ always() && inputs.source_sha == '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: combined-${{ matrix.python-version }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/combined/
+          if-no-files-found: error
+          retention-days: 14
 
   qualification:
-    name: Hosted release qualification (CI profile)
+    name: ${{ github.event_name == 'workflow_dispatch' && github.workflow == 'CI' && 'Selected source / ' || '' }}Hosted release qualification (CI profile)
     needs: [ruff, pytest]
+    if: ${{ !cancelled() && needs.ruff.result == 'success' && needs.pytest.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     services:

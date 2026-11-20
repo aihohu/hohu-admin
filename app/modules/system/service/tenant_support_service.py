@@ -99,7 +99,9 @@ class TenantSupportService:
         )
         total = (
             await db.scalar(
-                select(func.count()).select_from(SysOperationLog).where(*filters)
+                select(func.pg_catalog.count(SysOperationLog.operation_log_id)).where(
+                    *filters
+                )
             )
             or 0
         )
@@ -153,7 +155,7 @@ class TenantSupportService:
         )
         total = (
             await db.scalar(
-                select(func.count()).select_from(SysLoginLog).where(*filters)
+                select(func.pg_catalog.count(SysLoginLog.login_log_id)).where(*filters)
             )
             or 0
         )

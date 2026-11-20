@@ -167,7 +167,9 @@ class GrantAuthorityService:
         menu_ids = {int(menu.menu_id) for role in roles for menu in role.menus}
         permission_codes = collect_user_permission_codes(actor)
         resolution = await resolve_data_scope(db, actor, tenant=tenant)
-        visible_agents = await agent_authorization_service.list_agents(db, actor)
+        visible_agents = await agent_authorization_service.list_agents(
+            db, actor, force_refresh=True
+        )
         grantable_agent_ids = await agent_authorization_service.grantable_agent_ids(
             db,
             actor,

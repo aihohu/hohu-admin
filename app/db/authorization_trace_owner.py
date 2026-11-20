@@ -1,0 +1,54 @@
+"""Trace read owners return DTOs only after ending their protected snapshot."""
+
+from app.core.authorization_plan import LockMode, TenantLock, TransactionBudget
+from app.db.authorization_owner import rollback_authorization_session
+from app.modules.ai.service.authorization_trace_candidate import trace_candidate
+from app.modules.ai.service.field_authority_runtime import ai_field_authority
+from app.modules.system.service.authorization_read_budget import (
+    AuthorizationReadBudget,
+    bounded_authorization_reads,
+)
+from app.modules.system.service.authorization_transaction_service import (
+    authorization_transactions,
+)
+
+
+class TraceOwner:
+    def __init__(self, factory):
+        self.factory = factory
+
+    async def list(self, **request):
+        return await self._read(request, detail=False)
+
+    async def detail(self, **request):
+        return await self._read(request, detail=True)
+
+    async def operation(self, **request):
+        return await self._read(request, detail=False, operation=True)
+
+    async def _read(self, request, *, detail, operation=False):
+        async with self.factory() as db:
+            try:
+                with bounded_authorization_reads(
+                    db,
+                    AuthorizationReadBudget(
+                        max_statements=4096, max_bytes=128 * 1024 * 1024
+                    ),
+                ):
+                    async with authorization_transactions.scope(
+                        db,
+                        tenants=(
+                            TenantLock(request["tenant"].tenant_id, LockMode.EXCLUSIVE),
+                        ),
+                        budget=TransactionBudget(timeout_ms=8000),
+                    ) as tx:
+                        if operation:
+                            return await trace_candidate.operation(db, tx, **request)
+                        await ai_field_authority.current(
+                            db, tx, tenant=request["tenant"]
+                        )
+                        if detail:
+                            return await trace_candidate.detail(db, tx, **request)
+                        return await trace_candidate.list(db, tx, **request)
+            finally:
+                await rollback_authorization_session(db)

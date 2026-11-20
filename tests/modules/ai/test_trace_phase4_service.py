@@ -2,14 +2,18 @@
 
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import select
 from tenant_helpers import tenant_context
 
 from app.constants import STATUS_DISABLED, STATUS_ENABLED
-from app.core.exceptions import AuthorizationException, NotFoundException
+from app.core.exceptions import (
+    AuthenticationException,
+    AuthorizationException,
+    NotFoundException,
+)
 from app.core.tenant import TenantContext
 from app.modules.ai.agents.hitl.constants import AiExecutionMode, AiOperationStatus
 from app.modules.ai.api.operation_log import _ensure_trace_view, list_traces
@@ -238,19 +242,11 @@ def test_trace_permission_accepts_auditor_and_enabled_super_only() -> None:
     assert disabled_super.value.error_code == "AI_TRACE_FORBIDDEN"
 
 
-async def test_trace_list_api_uses_authenticated_tenant() -> None:
-    page = MagicMock()
-    lookup = AsyncMock(return_value=page)
-    with patch(
-        "app.modules.ai.api.operation_log.trace_service.list_traces",
-        lookup,
-    ):
-        response = await list_traces(
+async def test_trace_list_api_rejects_unverified_identity() -> None:
+    with pytest.raises(AuthenticationException):
+        await list_traces(
             query=TraceListQuery(),
             db=MagicMock(),
             current_user=_user("ai:trace:view"),
             tenant=tenant_context(tenant_id=0, actor_user_id=7001),
         )
-
-    assert response.data is page
-    assert lookup.await_args.kwargs["tenant"].tenant_id == 0

@@ -21,12 +21,19 @@ from app.core.exceptions import (
     setup_exception_handlers,
 )
 from app.core.id_generator import next_id
+from app.db import authorization_http
+from app.db.authorization_upload_owner import UploadOwner
 from app.db.session import get_db
 from app.modules.ai.api.chat import _convert_local_images_to_data_uri
 from app.modules.ai.service.model_authorization_service import (
     model_authorization_service,
 )
-from app.modules.auth.service import get_current_tenant_context, get_current_user
+from app.modules.auth.service import (
+    AccessIdentity,
+    get_current_tenant_context,
+    get_current_user,
+)
+from app.modules.system.api import file as file_api
 from app.modules.system.api.file import router as file_router
 from app.modules.system.models.file import File
 from app.modules.system.models.user import User
@@ -69,6 +76,10 @@ async def test_legacy_chat_image_is_never_classified_public(db_session, uploaded
     assert not await file_service.is_public_upload(db_session, record.file_url)
     record.business_type = "avatar"
     await db_session.flush()
+    assert not await file_service.is_public_upload(db_session, record.file_url)
+    owner = await db_session.get(User, record.owner_user_id)
+    owner.user_avatar = record.file_url
+    await db_session.flush()
     assert await file_service.is_public_upload(db_session, record.file_url)
     record.del_flag = "1"
     await db_session.flush()
@@ -95,6 +106,19 @@ async def test_chat_image_http_live_access(
         tenant = tenant_context(actor_user_id=tenant.actor_user_id + 1)
     elif scenario == "other-tenant":
         tenant = tenant_context(tenant_id=99, actor_user_id=tenant.actor_user_id)
+
+    # This dependency-override test isolates the HTTP boundary; the real fixed
+    # owner, original JWT and IO/recheck races are tested in authorization_chat_images.
+    monkeypatch.setattr(
+        file_api, "access_identity", lambda _user: AccessIdentity(tenant, 1)
+    )
+    monkeypatch.setattr(authorization_http, "release_request_reads", AsyncMock())
+
+    async def image_owner(_owner, *, file_url, tenant, actor_user_version):
+        assert actor_user_version == 1
+        return await file_service.read_chat_image(db_session, file_url, tenant=tenant)
+
+    monkeypatch.setattr(UploadOwner, "read_chat_image", image_owner)
 
     async def current_user():
         if scenario == "anonymous":
@@ -242,20 +266,23 @@ async def test_uploaded_image_becomes_inline_without_mutating_history(prefix):
         ]
     }
     before = deepcopy(body)
-    with patch(
-        "app.modules.system.service.file_service.file_service.read_chat_image",
-        AsyncMock(return_value=(b"image-bytes", "image/png")),
-        create=True,
-    ) as read:
+    with (
+        patch(
+            "app.db.authorization_upload_owner.UploadOwner.read_chat_image",
+            AsyncMock(return_value=(b"image-bytes", "image/png")),
+        ) as read,
+        patch("app.modules.ai.api.chat._finish_chat_read_phase", AsyncMock()),
+    ):
         result = await _convert_local_images_to_data_uri(
-            body, db=AsyncMock(), tenant=tenant_context()
+            body, db=AsyncMock(), tenant=tenant_context(), actor_user_version=1
         )
     assert (
         result["messages"][0]["parts"][0]["url"]
         == "data:image/png;base64," + base64.b64encode(b"image-bytes").decode()
     )
     assert body == before
-    assert read.await_args.args[1] == "/uploads/tenant-0/test.png"
+    assert read.await_args.kwargs["file_url"] == "/uploads/tenant-0/test.png"
+    assert read.await_args.kwargs["actor_user_version"] == 1
     assert read.await_args.kwargs["tenant"].actor_user_id == 1
 
 
@@ -275,12 +302,12 @@ async def test_external_image_is_not_mapped_to_local_disk():
         ]
     }
     with patch(
-        "app.modules.system.service.file_service.file_service.read_chat_image",
+        "app.db.authorization_upload_owner.UploadOwner.read_chat_image",
         AsyncMock(),
         create=True,
     ) as read:
         result = await _convert_local_images_to_data_uri(
-            body, db=AsyncMock(), tenant=tenant_context()
+            body, db=AsyncMock(), tenant=tenant_context(), actor_user_version=1
         )
     assert result == body
     read.assert_not_awaited()
@@ -305,6 +332,6 @@ async def test_invalid_local_reference_fails_before_provider(url):
     }
     with pytest.raises(BusinessRuleException) as error:
         await _convert_local_images_to_data_uri(
-            body, db=AsyncMock(), tenant=tenant_context()
+            body, db=AsyncMock(), tenant=tenant_context(), actor_user_version=1
         )
     assert error.value.error_code == "AI_IMAGE_NOT_AVAILABLE"

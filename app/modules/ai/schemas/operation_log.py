@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from pydantic.alias_generators import to_camel
 
 from app.modules.ai.schemas.time import AiUtcDatetime
+from app.modules.system.schemas.transfer_projection import SparseTransferOut
 
 
 class TraceListQuery(BaseModel):
@@ -31,20 +32,20 @@ class TraceTargetOut(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class TraceSummaryOut(BaseModel):
+class TraceSummaryOut(SparseTransferOut):
     """One trace-group row for the audit list."""
 
     trace_id: str
-    actor_id: int
-    actor_name: str
-    agent_codes: list[str]
-    tool_names: list[str]
-    statuses: list[str]
+    actor_id: int | None = None
+    actor_name: str | None = None
+    agent_codes: list[str] | None = None
+    tool_names: list[str] | None = None
+    statuses: list[str] | None = None
     operation_count: int
-    queued_at: AiUtcDatetime
+    queued_at: AiUtcDatetime | None = None
     finished_at: AiUtcDatetime | None = None
 
-    @field_serializer("actor_id")
+    @field_serializer("actor_id", when_used="unless-none")
     def _serialize_actor_id(self, value: int) -> str:
         return str(value)
 
@@ -55,26 +56,26 @@ class TraceSummaryOut(BaseModel):
     )
 
 
-class TraceOperationOut(BaseModel):
+class TraceOperationOut(SparseTransferOut):
     """Strict allowlist for one operation inside a Trace detail."""
 
     log_id: int
     tool_call_id: str
-    tool_name: str
-    agent_code: str
-    actor_id: int
+    tool_name: str | None = None
+    agent_code: str | None = None
+    actor_id: int | None = None
     actor_name: str | None = None
     source_message_id: int | None = None
     source_message_role: str | None = None
     source_message_at: AiUtcDatetime | None = None
     target_summary: list[TraceTargetOut] = Field(default_factory=list)
-    execution_mode: str
-    risk_level: str
-    status: str
+    execution_mode: str | None = None
+    risk_level: str | None = None
+    status: str | None = None
     error_code: str | None = None
     confirmation_id: str | None = None
     approved_by: int | None = None
-    queued_at: AiUtcDatetime
+    queued_at: AiUtcDatetime | None = None
     started_at: AiUtcDatetime | None = None
     finished_at: AiUtcDatetime | None = None
     duration_ms: int | None = None
@@ -116,14 +117,14 @@ class TraceDetailOut(BaseModel):
     )
 
 
-class OperationLogOut(BaseModel):
+class OperationLogOut(SparseTransferOut):
     """GET /ai/operation-log?tool_call_id=... 响应
 
     只暴露审计元信息，不返回 args_summary 或 result_summary 明细，避免泄漏。
     """
 
     tool_call_id: str = Field(..., description="单次 tool 调用 ID")
-    tool_name: str
+    tool_name: str | None = None
     status: str = Field(
         ..., description="running/pending_confirmation/success/failed/rejected/expired"
     )

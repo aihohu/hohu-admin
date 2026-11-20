@@ -1,23 +1,21 @@
 import json
-from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 from fastapi.security import HTTPAuthorizationCredentials
+from sqlalchemy import select, update
 from starlette.requests import Request
 
-from app.core.base_response import PageResult
 from app.core.security import create_access_token, create_platform_access_token
 from app.db.session import get_db
 from app.main import app
-from app.middleware import platform_audit_middleware
 from app.modules.ai.service.tenant_model_policy_admin_service import (
     tenant_model_policy_admin_service,
 )
 from app.modules.auth import service as auth_service
 from app.modules.auth.service import get_current_user
-from app.modules.platform import audit as platform_audit
-from app.modules.platform import system_agent_auth
+from app.modules.platform import api as platform_api
+from app.modules.platform.authorization_principal_audit import PrincipalAudit
 from app.modules.platform.constants import (
     PLATFORM_AI_READ,
     PLATFORM_SUPPORT_READ,
@@ -25,17 +23,44 @@ from app.modules.platform.constants import (
     PLATFORM_TENANT_BOOTSTRAP,
     PLATFORM_TENANT_WRITE,
 )
-from app.modules.platform.service import platform_auth_service
+from app.modules.platform.models import PlatformAuditLog
 from app.modules.platform.tenant_bootstrap_service import (
-    TenantBootstrapResult,
     tenant_bootstrap_service,
 )
+from app.modules.system.models.operation_log import SysOperationLog
+from app.modules.system.models.tenant import Tenant
 from app.modules.system.service.tenant_lifecycle_service import (
     tenant_lifecycle_service,
 )
 from app.modules.system.service.tenant_support_service import (
-    SupportAuditProjection,
     tenant_support_service,
+)
+from tests.modules.platform.test_authorization_principal_control_http import (
+    principal_control_http as principal_control_http,
+)
+from tests.modules.platform.test_authorization_principal_control_http import (
+    principal_http as principal_http,
+)
+from tests.modules.platform.test_authorization_principal_control_http import (
+    principal_sessions as principal_sessions,
+)
+from tests.modules.platform.test_authorization_tenant_http import (
+    catalog_http as catalog_http,
+)
+from tests.modules.platform.test_authorization_tenant_http import (
+    catalog_sessions as catalog_sessions,
+)
+from tests.modules.platform.test_authorization_tenant_http import (
+    http_system as http_system,
+)
+from tests.modules.platform.test_authorization_tenant_http import (
+    plan_sessions as plan_sessions,
+)
+from tests.modules.platform.test_authorization_tenant_http import (
+    system_sessions as system_sessions,
+)
+from tests.modules.platform.test_authorization_tenant_http import (
+    tenant_http as tenant_http,
 )
 
 
@@ -102,7 +127,11 @@ async def test_platform_dependency_audits_route_template_not_raw_dynamic_path(
 async def test_platform_login_http_returns_access_token_only(client, monkeypatch):
     db = AsyncMock()
     authenticate = AsyncMock(return_value="platform-access-token")
-    monkeypatch.setattr(platform_auth_service, "authenticate", authenticate)
+    monkeypatch.setattr(
+        platform_api,
+        "get_authorization_runtime",
+        lambda: SimpleNamespace(principal_login=authenticate),
+    )
     app.dependency_overrides[get_db] = lambda: db
 
     try:
@@ -122,269 +151,119 @@ async def test_platform_login_http_returns_access_token_only(client, monkeypatch
         "msg": "success",
         "data": {"token": "platform-access-token"},
     }
-    authenticate.assert_awaited_once()
-    db.commit.assert_awaited_once()
+    authenticate.assert_awaited_once_with(
+        principal_name="platform-operator", password="a-long-test-password"
+    )
+    db.commit.assert_not_awaited()
 
 
 async def test_platform_http_authorizes_before_service_and_appends_completion(
-    client, monkeypatch
+    principal_control_http, monkeypatch
 ):
-    principal = SimpleNamespace(
-        principal_id=81,
-        principal_name="platform-auditor",
-        status="1",
-        row_version=2,
-        permissions=[PLATFORM_SUPPORT_READ],
-    )
-    db = AsyncMock()
-    db.scalar.return_value = principal
-    business = AsyncMock(
-        return_value=PageResult(records=[], total=0, current=1, size=20)
-    )
-    authorized = AsyncMock(return_value=5001)
-    completed = AsyncMock(return_value=5002)
-    fallback = AsyncMock()
+    client, plain = principal_control_http
+    original = tenant_support_service.list_operation_logs
+    observed = []
+
+    async def business(db, **kwargs):
+        async with plain() as observer:
+            rows = (await observer.execute(select(PlatformAuditLog))).scalars().all()
+            assert len(rows) == 1 and rows[0].event_type == "authorized"
+        observed.append(kwargs["tenant_id"])
+        return await original(db, **kwargs)
+
     monkeypatch.setattr(tenant_support_service, "list_operation_logs", business)
-    monkeypatch.setattr(auth_service, "persist_platform_audit", authorized)
-    monkeypatch.setattr(platform_audit, "add_platform_completion", completed)
-    monkeypatch.setattr(
-        platform_audit_middleware, "persist_platform_completion", fallback
-    )
-    app.dependency_overrides[get_db] = lambda: db
-    token = create_platform_access_token(subject="81", principal_version=2)
-
-    try:
-        response = await client.get(
-            "/platform/tenants/9001/support/operation-logs",
-            headers=_platform_headers(token),
+    response = await client.get("/platform/tenants/1/support/operation-logs")
+    assert response.status_code == 200, response.text
+    assert observed == [1]
+    async with plain() as db:
+        rows = (
+            (
+                await db.execute(
+                    select(PlatformAuditLog).order_by(PlatformAuditLog.audit_id)
+                )
+            )
+            .scalars()
+            .all()
         )
-    finally:
-        app.dependency_overrides.pop(get_db, None)
-
-    assert response.status_code == 200
-    business.assert_awaited_once()
-    authorized.assert_awaited_once()
-    assert authorized.await_args.kwargs["event_type"] == "authorized"
-    completed.assert_awaited_once()
-    assert completed.await_args.args == (db,)
-    db.commit.assert_awaited_once()
-    fallback.assert_not_awaited()
-    assert completed.await_args.kwargs["authorization_audit_id"] == 5001
-    assert authorized.await_args.kwargs["request_summary"] == {"queryKeyCount": 0}
+        assert [row.event_type for row in rows] == ["authorized", "completed"]
+        assert rows[1].authorization_audit_id == rows[0].audit_id
 
 
 async def test_missing_platform_audit_header_has_zero_business_side_effect(
-    client, monkeypatch
+    principal_control_http, monkeypatch
 ):
-    principal = SimpleNamespace(
-        principal_id=82,
-        principal_name="platform-auditor",
-        status="1",
-        row_version=1,
-        permissions=[PLATFORM_SUPPORT_READ],
-    )
-    db = AsyncMock()
-    db.scalar.return_value = principal
-    business = AsyncMock(
-        return_value=PageResult(records=[], total=0, current=1, size=20)
-    )
-    denied = AsyncMock(return_value=5003)
+    client, plain = principal_control_http
+    business = AsyncMock()
     monkeypatch.setattr(tenant_support_service, "list_operation_logs", business)
-    monkeypatch.setattr(auth_service, "persist_platform_audit", denied)
-    app.dependency_overrides[get_db] = lambda: db
-    token = create_platform_access_token(subject="82", principal_version=1)
-    headers = _platform_headers(token)
-    headers.pop("X-Platform-Reason")
-
-    try:
-        response = await client.get(
-            "/platform/tenants/9001/support/operation-logs", headers=headers
-        )
-    finally:
-        app.dependency_overrides.pop(get_db, None)
-
-    assert response.status_code == 400
+    del client.headers["X-Platform-Reason"]
+    response = await client.get("/platform/tenants/1/support/operation-logs")
+    assert response.status_code == 400, response.text
     assert response.json()["errorCode"] == "PLATFORM_AUDIT_CONTEXT_REQUIRED"
     business.assert_not_awaited()
-    denied.assert_awaited_once()
-    assert denied.await_args.kwargs["event_type"] == "denied"
+    async with plain() as db:
+        rows = (await db.execute(select(PlatformAuditLog))).scalars().all()
+        assert len(rows) == 1 and rows[0].event_type == "denied"
 
 
 async def test_platform_completion_failure_log_does_not_render_exception_secrets(
-    client, monkeypatch, caplog
+    principal_control_http, monkeypatch, caplog
 ):
-    principal = SimpleNamespace(
-        principal_id=83,
-        principal_name="platform-auditor",
-        status="1",
-        row_version=1,
-        permissions=[PLATFORM_SUPPORT_READ],
-    )
-    db = AsyncMock()
-    db.scalar.return_value = principal
-    monkeypatch.setattr(
-        tenant_support_service,
-        "list_operation_logs",
-        AsyncMock(return_value=PageResult(records=[], total=0, current=1, size=20)),
-    )
-    monkeypatch.setattr(
-        auth_service, "persist_platform_audit", AsyncMock(return_value=9)
-    )
+    client, plain = principal_control_http
     completion = AsyncMock(side_effect=RuntimeError("password=abcdefghijklmnop123456"))
-    staged = AsyncMock(side_effect=RuntimeError("password=abcdefghijklmnop123456"))
-    monkeypatch.setattr(platform_audit, "add_platform_completion", staged)
-    monkeypatch.setattr(
-        platform_audit_middleware, "persist_platform_completion", completion
-    )
-    app.dependency_overrides[get_db] = lambda: db
-    token = create_platform_access_token(subject="83", principal_version=1)
-
-    try:
-        response = await client.get(
-            "/platform/tenants/9001/support/operation-logs",
-            headers=_platform_headers(token),
-        )
-    finally:
-        app.dependency_overrides.pop(get_db, None)
-
-    assert response.status_code == 503
+    monkeypatch.setattr(PrincipalAudit, "append", completion)
+    response = await client.get("/platform/tenants/1/support/operation-logs")
+    assert response.status_code == 503, response.text
     assert response.json()["errorCode"] == "PLATFORM_AUDIT_UNAVAILABLE"
     assert completion.await_count == 2
-    staged.assert_awaited_once()
-    assert staged.await_args.args == (db,)
-    db.commit.assert_not_awaited()
-    db.rollback.assert_awaited_once()
+    async with plain() as db:
+        rows = (await db.execute(select(PlatformAuditLog))).scalars().all()
+        assert len(rows) == 1 and rows[0].event_type == "authorized"
     assert "abcdefghijklmnop123456" not in caplog.text
-    assert "RuntimeError" in caplog.text
+    assert "abcdefghijklmnop123456" not in response.text
 
 
-async def test_prepare_tenant_preallocates_and_audits_server_bound_target(
-    client, monkeypatch
-):
-    actor = SimpleNamespace(
-        user_id=12,
-        tenant_id=0,
-        user_name="renamed-system-admin",
-        status="1",
-        roles=[SimpleNamespace(tenant_id=0, role_code="R_SUPER", status="1")],
+async def test_prepare_tenant_audits_target_allocated_under_guard(tenant_http):
+    client, plain = tenant_http
+    response = await client.post(
+        "/platform/tenants",
+        headers={"Idempotency-Key": "tenant-create-http-0001"},
+        json={"tenantCode": "tenant-acme", "tenantName": "Acme"},
     )
-    app.dependency_overrides[get_current_user] = lambda: actor
-    db = AsyncMock()
-    db.add = Mock()
-    db.scalar.return_value = None
-    now = datetime.now(UTC)
-    prepared = SimpleNamespace(
-        tenant_id=991001,
-        tenant_code="tenant-acme",
-        tenant_name="Acme",
-        status="2",
-        lifecycle_state="prepared",
-        row_version=1,
-        created_at=now,
-        updated_at=now,
-    )
-    prepare = AsyncMock(return_value=prepared)
-    authorized = AsyncMock(return_value=5101)
-    completed = AsyncMock(return_value=5102)
-    monkeypatch.setattr(auth_service, "next_id", lambda: 991001)
-    monkeypatch.setattr(tenant_lifecycle_service, "prepare_tenant", prepare)
-    monkeypatch.setattr(system_agent_auth, "persist_system_agent_audit", authorized)
-    monkeypatch.setattr(
-        platform_audit_middleware, "persist_platform_completion", completed
-    )
-    app.dependency_overrides[get_db] = lambda: db
-    token = create_platform_access_token(subject="84", principal_version=1)
-    headers = _platform_headers(token) | {"Idempotency-Key": "tenant-create-http-0001"}
-
-    try:
-        response = await client.post(
-            "/platform/tenants",
-            headers=headers,
-            json={"tenantCode": "tenant-acme", "tenantName": "Acme"},
-        )
-    finally:
-        app.dependency_overrides.pop(get_db, None)
-        app.dependency_overrides.pop(get_current_user, None)
-
-    assert response.status_code == 200
-    target_id = authorized.await_args.kwargs["target_tenant_id"]
-    assert target_id > 0
-    assert prepare.await_args.kwargs["tenant_id"] == target_id
-    assert prepare.await_args.kwargs["platform"].target_tenant_id == target_id
+    assert response.status_code == 200, response.text
     body = response.json()["data"]
     assert body["enabled"] is False
     assert body["lifecycleState"] == "prepared"
     assert "status" not in body
-    assert (
-        json.loads(db.add.call_args.args[0].request_params)["target_tenant_id"]
-        == target_id
-    )
-    assert json.loads(db.add.call_args.args[0].request_params)["result_summary"] == {
-        "recordCount": 1,
-    }
+    async with plain() as db:
+        logs = (
+            (
+                await db.execute(
+                    select(SysOperationLog).order_by(SysOperationLog.operation_log_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [row.action for row in logs] == ["authorized", "completed"]
+        assert json.loads(logs[0].request_params)["target_tenant_id"] is None
+        assert (
+            json.loads(logs[1].request_params)["result_summary"]["tenantId"]
+            == body["tenantId"]
+        )
 
 
 async def test_support_http_binds_route_target_and_returns_no_private_fields(
-    client, monkeypatch
+    principal_control_http,
 ):
-    tenant_id = 991002
-    principal = SimpleNamespace(
-        principal_id=85,
-        principal_name="support-reader",
-        status="1",
-        row_version=1,
-        permissions=[PLATFORM_SUPPORT_READ],
-    )
-    db = AsyncMock()
-    db.scalar.return_value = principal
-    page = PageResult(
-        records=[
-            SupportAuditProjection(
-                event_id=7001,
-                category="system",
-                event_type="update",
-                outcome="200",
-                duration_ms=4,
-                occurred_at=datetime.now(),
-            )
-        ],
-        total=1,
-        current=1,
-        size=20,
-    )
-    query = AsyncMock(return_value=page)
-    authorized = AsyncMock(return_value=5201)
-    completed = AsyncMock(return_value=5202)
-    monkeypatch.setattr(tenant_support_service, "list_operation_logs", query)
-    monkeypatch.setattr(auth_service, "persist_platform_audit", authorized)
-    monkeypatch.setattr(platform_audit, "add_platform_completion", completed)
-    app.dependency_overrides[get_db] = lambda: db
-    token = create_platform_access_token(subject="85", principal_version=1)
-
-    try:
-        response = await client.get(
-            f"/platform/tenants/{tenant_id}/support/operation-logs",
-            headers=_platform_headers(token),
-        )
-    finally:
-        app.dependency_overrides.pop(get_db, None)
-
-    assert response.status_code == 200
-    assert authorized.await_args.kwargs["target_tenant_id"] == tenant_id
-    assert query.await_args.kwargs["tenant_id"] == tenant_id
-    record = response.json()["data"]["records"][0]
-    assert set(record) == {
-        "eventId",
-        "category",
-        "eventType",
-        "outcome",
-        "durationMs",
-        "occurredAt",
-    }
-    assert completed.await_args.kwargs["result_summary"] == {
-        "statusCode": 200,
-        "recordCount": 1,
-    }
+    client, plain = principal_control_http
+    response = await client.get("/platform/tenants/1/support/operation-logs")
+    assert response.status_code == 200, response.text
+    item = response.json()["data"]["records"][0]
+    assert item["eventId"] == "900"
+    assert "userId" not in item and "requestParams" not in item and "ip" not in item
+    async with plain() as db:
+        rows = (await db.execute(select(PlatformAuditLog))).scalars().all()
+        assert len(rows) == 2 and all(row.target_tenant_id == 1 for row in rows)
 
 
 async def test_tenant_access_token_cannot_reach_platform_tenant_registry(
@@ -484,68 +363,24 @@ async def test_platform_support_reader_cannot_prepare_tenant(client, monkeypatch
 
 
 async def test_bootstrap_http_keeps_secret_and_machine_ids_out_of_projection(
-    client, monkeypatch
+    tenant_http,
 ):
-    tenant_id = 991004
-    principal = SimpleNamespace(
-        principal_id=87,
-        principal_name="tenant-bootstrapper",
-        status="1",
-        row_version=1,
-        permissions=[PLATFORM_TENANT_BOOTSTRAP],
+    client, plain = tenant_http
+    created = await client.post(
+        "/platform/tenants",
+        headers={"Idempotency-Key": "tenant-create-bootstrap-key"},
+        json={"tenantCode": "tenant-gamma", "tenantName": "Gamma"},
     )
-    actor = SimpleNamespace(
-        user_id=12,
-        tenant_id=0,
-        user_name="renamed-system-admin",
-        status="1",
-        roles=[SimpleNamespace(tenant_id=0, role_code="R_SUPER", status="1")],
+    assert created.status_code == 200, created.text
+    tenant_id = created.json()["data"]["tenantId"]
+    raw_password, raw_key = "TenantAdmin123", "tenant-bootstrap-http-secret-key"
+    response = await client.post(
+        f"/platform/tenants/{tenant_id}/bootstrap",
+        headers={"Idempotency-Key": raw_key},
+        json={"defaultModelId": "601", "adminPassword": raw_password},
     )
-    app.dependency_overrides[get_current_user] = lambda: actor
-    db = AsyncMock()
-    db.add = Mock()
-    db.scalar.return_value = principal
-    bootstrap = AsyncMock(
-        return_value=TenantBootstrapResult(
-            tenant_code="tenant-gamma",
-            lifecycle_state="prepared",
-            admin_username="admin",
-            model_label="Safe Provider / Chat Model",
-            menu_count=47,
-            role_count=2,
-            model_policy_count=1,
-            agent_binding_count=4,
-            replayed=False,
-        )
-    )
-    authorized = AsyncMock(return_value=5401)
-    completed = AsyncMock(return_value=5402)
-    monkeypatch.setattr(tenant_bootstrap_service, "bootstrap", bootstrap)
-    monkeypatch.setattr(system_agent_auth, "persist_system_agent_audit", authorized)
-    monkeypatch.setattr(
-        platform_audit_middleware, "persist_platform_completion", completed
-    )
-    app.dependency_overrides[get_db] = lambda: db
-    token = create_platform_access_token(subject="87", principal_version=1)
-    raw_password = "TenantAdmin123"
-    raw_key = "tenant-bootstrap-http-secret-key"
-
-    try:
-        response = await client.post(
-            f"/platform/tenants/{tenant_id}/bootstrap",
-            headers=_platform_headers(token) | {"Idempotency-Key": raw_key},
-            json={
-                "defaultModelId": "88001",
-                "adminPassword": raw_password,
-            },
-        )
-    finally:
-        app.dependency_overrides.pop(get_db, None)
-        app.dependency_overrides.pop(get_current_user, None)
-
-    assert response.status_code == 200
-    data = response.json()["data"]
-    assert set(data) == {
+    assert response.status_code == 200, response.text
+    assert set(response.json()["data"]) == {
         "tenantCode",
         "lifecycleState",
         "bootstrapStatus",
@@ -557,80 +392,52 @@ async def test_bootstrap_http_keeps_secret_and_machine_ids_out_of_projection(
         "agentBindingCount",
         "replayed",
     }
-    assert raw_password not in response.text
-    assert raw_key not in response.text
-    assert "88001" not in response.text
-    assert authorized.await_args.kwargs["target_tenant_id"] == tenant_id
-    assert authorized.await_args.kwargs["request_summary"] == {"queryKeyCount": 0}
-    assert json.loads(db.add.call_args.args[0].request_params)["result_summary"] == {
-        "recordCount": 1,
-    }
-
-
-async def test_activate_http_uses_dedicated_permission_and_bound_target(
-    client, monkeypatch
-):
-    tenant_id = 991006
-    principal = SimpleNamespace(
-        principal_id=89,
-        principal_name="tenant-activator",
-        status="1",
-        row_version=1,
-        permissions=[PLATFORM_TENANT_ACTIVATE],
-    )
-    actor = SimpleNamespace(
-        user_id=12,
-        tenant_id=0,
-        user_name="renamed-system-admin",
-        status="1",
-        roles=[SimpleNamespace(tenant_id=0, role_code="R_SUPER", status="1")],
-    )
-    app.dependency_overrides[get_current_user] = lambda: actor
-    db = AsyncMock()
-    db.add = Mock()
-    db.scalar.return_value = principal
-    now = datetime.now(UTC)
-    activated = SimpleNamespace(
-        tenant_id=tenant_id,
-        tenant_code="tenant-active",
-        tenant_name="Active Tenant",
-        status="1",
-        lifecycle_state="active",
-        bootstrap_version=1,
-        row_version=2,
-        created_at=now,
-        updated_at=now,
-    )
-    activate = AsyncMock(return_value=activated)
-    authorized = AsyncMock(return_value=5451)
-    completed = AsyncMock(return_value=5452)
-    monkeypatch.setattr(tenant_lifecycle_service, "activate_tenant", activate)
-    monkeypatch.setattr(system_agent_auth, "persist_system_agent_audit", authorized)
-    monkeypatch.setattr(
-        platform_audit_middleware, "persist_platform_completion", completed
-    )
-    app.dependency_overrides[get_db] = lambda: db
-    token = create_platform_access_token(subject="89", principal_version=1)
-
-    try:
-        response = await client.post(
-            f"/platform/tenants/{tenant_id}/activate",
-            headers=_platform_headers(token),
+    assert raw_password not in response.text and raw_key not in response.text
+    assert "601" not in response.text
+    async with plain() as db:
+        rows = (
+            (
+                await db.execute(
+                    select(SysOperationLog).where(
+                        SysOperationLog.path.endswith("/bootstrap")
+                    )
+                )
+            )
+            .scalars()
+            .all()
         )
-    finally:
-        app.dependency_overrides.pop(get_db, None)
-        app.dependency_overrides.pop(get_current_user, None)
+        assert len(rows) == 2
+        for row in rows:
+            metadata = json.loads(row.request_params)
+            assert metadata["target_tenant_id"] == int(tenant_id)
+            assert metadata["permission"] == PLATFORM_TENANT_BOOTSTRAP
+            assert (
+                raw_password not in row.request_params
+                and raw_key not in row.request_params
+            )
 
-    assert response.status_code == 200
-    assert response.json()["data"]["enabled"] is True
-    assert response.json()["data"]["lifecycleState"] == "active"
-    assert response.json()["data"]["bootstrapStatus"] == "ready"
-    assert authorized.await_args.kwargs["permission"] == PLATFORM_TENANT_ACTIVATE
-    assert authorized.await_args.kwargs["target_tenant_id"] == tenant_id
-    assert activate.await_args.kwargs["platform"].target_tenant_id == tenant_id
-    assert json.loads(db.add.call_args.args[0].request_params)["result_summary"] == {
-        "recordCount": 1,
-    }
+
+async def test_activate_http_uses_dedicated_permission_and_bound_target(tenant_http):
+    client, plain = tenant_http
+    async with plain() as db:
+        await db.execute(
+            update(Tenant)
+            .where(Tenant.tenant_id == 1)
+            .values(status="2", lifecycle_state="prepared", bootstrap_version=1)
+        )
+        await db.commit()
+    response = await client.post("/platform/tenants/1/activate")
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["enabled"] is True and data["lifecycleState"] == "active"
+    assert data["bootstrapStatus"] == "ready"
+    async with plain() as db:
+        rows = (await db.execute(select(SysOperationLog))).scalars().all()
+        assert len(rows) == 2
+        for row in rows:
+            metadata = json.loads(row.request_params)
+            assert metadata["permission"] == PLATFORM_TENANT_ACTIVATE
+            assert metadata["target_tenant_id"] == 1
 
 
 async def test_tenant_writer_cannot_reach_bootstrap_endpoint(client, monkeypatch):

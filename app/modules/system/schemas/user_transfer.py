@@ -18,6 +18,7 @@ from pydantic import (
     TypeAdapter,
     field_serializer,
     field_validator,
+    model_validator,
 )
 from pydantic.alias_generators import to_camel
 
@@ -163,6 +164,18 @@ class ImportResult(_CamelBase):
 
 class UserExportFilter(_CamelBase):
     """用户导出的 POST body 筛选条件。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_ambiguous_aliases(cls, value):
+        if isinstance(value, dict):
+            for name in cls.model_fields:
+                alias = to_camel(name)
+                if name != alias and name in value and alias in value:
+                    raise ValueError("同一字段不能同时使用两种命名")
+        return value
 
     user_name: str | None = None
     user_names: list[str] | None = Field(

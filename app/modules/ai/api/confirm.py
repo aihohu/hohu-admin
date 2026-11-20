@@ -3,8 +3,8 @@
 POST /ai/confirm authenticates the owner and current authority before claiming
 the action and required audit. The Gateway owns the business transaction;
 subsequent chat projection reads validated completion facts in a fresh session.
-Uncertain commits remain running and never authorize replay. The Redis-only
-legacy confirmation path retains its separate compatibility behavior.
+Uncertain commits remain running and never authorize replay. Only fixed durable
+adapters are reachable from the registered route.
 """
 
 import asyncio
@@ -29,17 +29,19 @@ from app.core.exceptions import (
 )
 from app.core.redis import redis_client
 from app.core.tenant import TenantContext, get_bound_tenant_context
+from app.db.authorization_http import get_authorization_runtime, release_request_reads
+from app.db.authorization_lifecycle_owner import PendingConfirmationRevalidationFailed
+from app.db.request_session import RequestSession
 from app.db.session import AsyncSessionLocal, get_db
 from app.modules.ai.agents.gateway.atomic_execution import (
     OUTCOME_UNKNOWN_MESSAGE,
     PreparedExecutionOutcomeUnknown,
     _commit_with_budget,
     _discard_uncertain_session,
-    _owned_session,
-    reconcile_prepared_completion,
 )
 from app.modules.ai.agents.gateway.executor import (
     execute_approved_prepared_action,
+    record_prepared_execution_outcome,
     validate_prepared_execution,
 )
 from app.modules.ai.agents.gateway.result import ToolResult
@@ -61,6 +63,9 @@ from app.modules.ai.service.atomic_completion_service import (
     is_registered_readonly_action,
     new_execution_owner,
 )
+from app.modules.ai.service.authorization_execution_candidate import (
+    ExecutionDisposition,
+)
 from app.modules.ai.service.chat_run_service import (
     chat_run_finalizer,
     chat_run_guard,
@@ -72,7 +77,7 @@ from app.modules.ai.service.reconciliation_annotation import has_annotation
 from app.modules.ai.service.result_projection_service import (
     result_projection_service,
 )
-from app.modules.auth.service import get_current_user, load_live_user_authority
+from app.modules.auth.service import access_identity, get_current_user
 from app.modules.system.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -111,18 +116,23 @@ def _unknown_response(claim: ClaimBinding) -> ResponseModel[ConfirmResponse]:
 async def _read_unexecuted_response(action_ref, *, tenant: TenantContext):  # noqa: ANN001
     """A cancelled label is terminal only when its never-started proof binds."""
     try:
-        async with asyncio.timeout(8), _owned_session() as db:
-            try:
-                await db.begin()
-                completed = await atomic_completion_service.lock_unexecuted_terminal(
-                    db, action_ref.confirmation_id, tenant=tenant
-                )
-                return ResponseModel.success(data=_prepared_response(completed.action))
-            except (Exception, asyncio.CancelledError):
-                await _discard_uncertain_session(db)
-                raise
+        action = await get_authorization_runtime().lifecycle.unexecuted(
+            action_ref.confirmation_id, tenant=tenant
+        )
+        return ResponseModel.success(data=_prepared_response(action))
     except (Exception, asyncio.CancelledError):
         return _unknown_response(action_ref)
+
+
+async def reconcile_prepared_completion(
+    confirmation_id, *, tenant, expected_claim=None, allow_fence=False
+):
+    return await get_authorization_runtime().recovery.reconcile(
+        confirmation_id,
+        tenant=tenant,
+        expected_claim=expected_claim,
+        allow_fence=allow_fence,
+    )
 
 
 async def _project_prepared_completion(
@@ -131,94 +141,63 @@ async def _project_prepared_completion(
     current_user_id: int,
     tenant: TenantContext,
     action_ref=None,
+    known_outcome: ExecutionDisposition | None = None,
 ) -> ResponseModel[ConfirmResponse]:
-    """Read fresh authoritative facts; a display failure cannot change them."""
-    response = None
-    terminal = None
-    try:
-        async with asyncio.timeout(1), _owned_session() as projection_db:
-            try:
-                await projection_db.begin()
-                await projection_db.execute(
-                    select(func.set_config("lock_timeout", "2s", True))
-                )
-                if isinstance(action_ref, ClaimBinding):
-                    completed = await atomic_completion_service.lock_claim(
-                        projection_db,
-                        action_ref,
-                        tenant=tenant,
-                        require_active=False,
-                        require_running=False,
-                    )
-                else:
-                    completed = await atomic_completion_service.lock_terminal(
-                        projection_db, confirmation_id=confirmation_id, tenant=tenant
-                    )
-                if completed.action.user_id != current_user_id:
-                    raise NotFoundException(
-                        "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
-                    )
-                terminal = completed.action
-                status = PreparedActionStatus(terminal.status)
-                if status not in {
-                    PreparedActionStatus.SUCCEEDED,
-                    PreparedActionStatus.FAILED,
-                }:
-                    return ResponseModel.success(data=_prepared_response(terminal))
-                if (
-                    status == PreparedActionStatus.FAILED
-                    and terminal.execute_tool_name not in DB_TOOLS
-                ):
-                    return _unknown_response(terminal)
-                response = _prepared_response(terminal)
-                actor = await load_live_user_authority(projection_db, tenant=tenant)
-                ensure_ai_chat_use(actor)
-                ok = status == PreparedActionStatus.SUCCEEDED
-                if (
-                    ok
-                    and not await result_projection_service.authorize_result_projection(
-                        projection_db,
-                        actor,
-                        owner_user_id=terminal.user_id,
-                        lineage=result_projection_service.lineage_from_record(terminal),
-                    )
-                ):
-                    return ResponseModel.success(data=response)
-                await chat_run_finalizer.finalize_prepared_action(
-                    projection_db,
-                    action=terminal,
-                    ok=ok,
-                    duration_ms=terminal.duration_ms or 0,
-                    result=terminal.result_data if ok else None,
-                    result_ui=terminal.result_ui if ok else None,
-                    error_code=terminal.error_code if not ok else None,
-                    error_msg="操作未完成，业务修改已回滚。" if not ok else None,
-                    tenant=tenant,
-                    locked_completion=completed,
-                )
-                await projection_db.commit()
-            except (Exception, asyncio.CancelledError):
-                await _discard_uncertain_session(projection_db)
-                raise
-    except Exception:
-        if response is None:
-            if action_ref is not None:
-                return _unknown_response(action_ref)
-            raise
-        logger.warning(
-            "prepared completion display unavailable confirmation_id=%s",
-            confirmation_id,
-            exc_info=True,
+    """Read verified facts, then independently repair the current projection."""
+    if current_user_id != tenant.actor_user_id:
+        raise NotFoundException(
+            "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
         )
+    runtime = get_authorization_runtime()
+    outcome = await runtime.recovery.reconcile(
+        confirmation_id,
+        tenant=tenant,
+        expected_claim=action_ref if isinstance(action_ref, ClaimBinding) else None,
+    )
+    if outcome.disposition not in {"succeeded", "failed"} or outcome.action is None:
+        if (
+            type(known_outcome) is ExecutionDisposition
+            and known_outcome.disposition in {"succeeded", "failed"}
+            and type(action_ref) is ClaimBinding
+            and action_ref.tenant_id == tenant.tenant_id
+            and action_ref.actor_user_id == current_user_id
+        ):
+            return ResponseModel.success(
+                msg="操作结果已保存，显示同步暂未完成，请刷新会话。",
+                data=ConfirmResponse(
+                    actionId=action_ref.action_id,
+                    toolCallId=action_ref.execute_tool_call_id,
+                    status=known_outcome.disposition,
+                ),
+            )
+        if action_ref is not None:
+            return _unknown_response(action_ref)
+        raise NotFoundException(
+            "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
+        )
+    terminal = outcome.action
+    response = _prepared_response(terminal)
+    display_failed = False
+    try:
+        async with asyncio.timeout(1):
+            await runtime.chat.recover(tenant=tenant, confirmation_id=confirmation_id)
+    except Exception:
+        # This transaction can only repair display facts. Its ACK uncertainty
+        # neither erases a business terminal nor permits executing it again.
+        display_failed = True
+        logger.warning(
+            "Prepared completion display unavailable confirmation_id=%s",
+            confirmation_id,
+        )
+    with suppress(Exception):
+        async with asyncio.timeout(0.25):
+            await _notify_prepared_terminal(
+                terminal, ConfirmAction.APPROVED, tenant=tenant
+            )
+    if display_failed:
         return ResponseModel.success(
             msg="操作结果已保存，显示同步暂未完成，请刷新会话。", data=response
         )
-    if terminal is not None:
-        with suppress(Exception):
-            async with asyncio.timeout(0.25):
-                await _notify_prepared_terminal(
-                    terminal, ConfirmAction.APPROVED, tenant=tenant
-                )
     return ResponseModel.success(data=response)
 
 
@@ -400,6 +379,179 @@ async def _terminalize_before_execution(
         tenant=tenant,
     )
     return terminal
+
+
+async def _repair_cancelled_display(action, *, tenant):
+    with suppress(Exception):
+        async with asyncio.timeout(1):
+            await get_authorization_runtime().chat.recover(
+                tenant=tenant, confirmation_id=action.confirmation_id
+            )
+    with suppress(Exception):
+        async with asyncio.timeout(0.25):
+            await _notify_prepared_terminal(
+                action, ConfirmAction.REJECTED, tenant=tenant
+            )
+
+
+async def _confirm_planned(req, *, db, current_user, action_ref):
+    identity = access_identity(current_user)
+    if action_ref.user_id != identity.tenant.actor_user_id:
+        raise NotFoundException(
+            "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
+        )
+    # Internal callers use the same path; only the request class needs its
+    # permanent handoff marker. Neither branch may carry pending writes.
+    if isinstance(db, RequestSession):
+        await release_request_reads(db)
+    else:
+        if db.new or db.dirty or db.deleted:
+            raise BusinessRuleException(
+                "Confirmation session has pending writes",
+                error_code="AUTHORIZATION_LOCK_ORDER_INVALID",
+            )
+        db.expunge_all()
+        await db.rollback()
+    disabled = False
+    if req.action == "approve" and action_ref.status == "pending_confirmation":
+        async with asyncio.timeout(2):
+            disabled = await check_user_disabled(
+                redis_client, identity.tenant.actor_user_id, tenant=identity.tenant
+            )
+    runtime = get_authorization_runtime()
+    try:
+        admission = await runtime.lifecycle.admit(
+            req.confirmation_id,
+            tenant=identity.tenant,
+            actor_user_version=identity.user_version,
+            decision=req.action,
+            disabled=disabled,
+        )
+    except BusinessException as exc:
+        if exc.error_code in {
+            "AUTHORIZATION_COMMIT_UNKNOWN",
+            "AUTHORIZATION_TRANSACTION_TIMEOUT",
+            "FIELD_POLICY_UNAVAILABLE",
+        }:
+            return _unknown_response(action_ref)
+        raise
+    if admission.disposition == "unknown":
+        return _unknown_response(action_ref)
+    if admission.disposition in {"rejected", "expired"}:
+        if not admission.changed:
+            return await _read_unexecuted_response(
+                admission.action, tenant=identity.tenant
+            )
+        await _repair_cancelled_display(admission.action, tenant=identity.tenant)
+        if admission.error is not None:
+            raise admission.error
+        return ResponseModel.success(data=_prepared_response(admission.action))
+    known_outcome = None
+    if admission.disposition == "pending_confirmation":
+        try:
+            outcome = await runtime.lifecycle.confirm(
+                req.confirmation_id,
+                tenant=identity.tenant,
+                actor_user_version=identity.user_version,
+            )
+        except PendingConfirmationRevalidationFailed as exc:
+            try:
+                denied = await runtime.lifecycle.admit(
+                    req.confirmation_id,
+                    tenant=identity.tenant,
+                    actor_user_version=identity.user_version,
+                    decision="approve",
+                    disabled=disabled,
+                    denial=exc.denial,
+                )
+            except BusinessException as denial_error:
+                if denial_error.error_code in {
+                    "AUTHORIZATION_COMMIT_UNKNOWN",
+                    "AUTHORIZATION_TRANSACTION_TIMEOUT",
+                    "FIELD_POLICY_UNAVAILABLE",
+                }:
+                    return _unknown_response(action_ref)
+                raise
+            if not denied.changed:
+                return _unknown_response(action_ref)
+            await _repair_cancelled_display(denied.action, tenant=identity.tenant)
+            raise exc.denial
+        except BusinessException as exc:
+            if exc.error_code in {
+                "AUTHORIZATION_COMMIT_UNKNOWN",
+                "AUTHORIZATION_TRANSACTION_TIMEOUT",
+                "FIELD_POLICY_UNAVAILABLE",
+            }:
+                return _unknown_response(action_ref)
+            raise
+        if outcome.disposition == "unknown":
+            return _unknown_response(action_ref)
+        known_outcome = outcome
+        if outcome.claim is not None:
+            await record_prepared_execution_outcome(
+                outcome.claim, outcome, tenant=identity.tenant
+            )
+    return await _project_prepared_completion(
+        req.confirmation_id,
+        current_user_id=identity.tenant.actor_user_id,
+        tenant=identity.tenant,
+        action_ref=known_outcome.claim
+        if known_outcome is not None and known_outcome.claim is not None
+        else admission.action,
+        known_outcome=known_outcome,
+    )
+
+
+async def _confirm_read_planned(req, *, db, current_user, action_ref):
+    identity = access_identity(current_user)
+    if isinstance(db, RequestSession):
+        await release_request_reads(db)
+    else:
+        if db.new or db.dirty or db.deleted:
+            raise BusinessRuleException(
+                "Confirmation session has pending writes",
+                error_code="AUTHORIZATION_LOCK_ORDER_INVALID",
+            )
+        db.expunge_all()
+        await db.rollback()
+    disabled = False
+    if req.action == "approve" and action_ref.status == "pending_confirmation":
+        async with asyncio.timeout(2):
+            disabled = await check_user_disabled(
+                redis_client, identity.tenant.actor_user_id, tenant=identity.tenant
+            )
+    runtime = get_authorization_runtime()
+    try:
+        terminal = await runtime.read_confirmation.confirm(
+            req.confirmation_id,
+            tenant=identity.tenant,
+            actor_user_version=identity.user_version,
+            decision=req.action,
+            disabled=disabled,
+        )
+    except BusinessException as exc:
+        if exc.error_code in {
+            "AUTHORIZATION_COMMIT_UNKNOWN",
+            "AUTHORIZATION_TRANSACTION_TIMEOUT",
+            "FIELD_POLICY_UNAVAILABLE",
+        }:
+            return _unknown_response(action_ref)
+        raise
+    with suppress(Exception):
+        async with asyncio.timeout(1):
+            await runtime.chat.recover(
+                tenant=identity.tenant, confirmation_id=req.confirmation_id
+            )
+    with suppress(Exception):
+        async with asyncio.timeout(0.25):
+            await _notify_prepared_terminal(
+                terminal,
+                ConfirmAction.APPROVED
+                if req.action == "approve"
+                else ConfirmAction.REJECTED,
+                tenant=identity.tenant,
+            )
+    return ResponseModel.success(data=_prepared_response(terminal))
 
 
 async def _confirm_prepared(
@@ -740,7 +892,7 @@ async def _confirm_prepared(
         # state. Business and completion now belong to the Gateway transaction.
         db.expunge_all()
         try:
-            await execute_approved_prepared_action(claim, deps)
+            known_outcome = await execute_approved_prepared_action(claim, deps)
         except PreparedExecutionOutcomeUnknown:
             return _unknown_response(claim)
         return await _project_prepared_completion(
@@ -748,6 +900,7 @@ async def _confirm_prepared(
             current_user_id=current_user_id,
             tenant=tenant,
             action_ref=claim,
+            known_outcome=known_outcome,
         )
 
     started_at = time.monotonic()
@@ -863,6 +1016,37 @@ async def confirm_tool(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ResponseModel[ConfirmResponse]:
+    """Dispatch only durable actions with a fixed authorization owner."""
+    from app.modules.ai.service.authorization_gateway_read_candidate import (  # noqa: PLC0415
+        READ_HANDLERS,
+    )
+
+    tenant = get_bound_tenant_context(current_user)
+    action = await prepared_action_service.get_by_confirmation_id(
+        db, req.confirmation_id, tenant=tenant
+    )
+    if action is None:
+        raise NotFoundException(
+            "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
+        )
+    if action.execute_tool_name in READ_HANDLERS:
+        return await _confirm_read_planned(
+            req, db=db, current_user=current_user, action_ref=action
+        )
+    if action.execute_tool_name in DB_TOOLS | FILE_TOOLS:
+        return await _confirm_planned(
+            req, db=db, current_user=current_user, action_ref=action
+        )
+    raise BusinessRuleException(
+        "该操作缺少可用的授权事务适配", error_code="AI_PREPARED_ACTION_REQUIRED"
+    )
+
+
+async def _legacy_confirm_tool(
+    req: ConfirmRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ResponseModel[ConfirmResponse]:
     """用户在 HITL 抽屉点确认 / 取消
 
     确认流程：
@@ -877,6 +1061,18 @@ async def confirm_tool(
         db, req.confirmation_id, tenant=tenant
     )
     if prepared_action is not None:
+        from app.modules.ai.service.authorization_gateway_read_candidate import (  # noqa: PLC0415
+            READ_HANDLERS,
+        )
+
+        if prepared_action.execute_tool_name in READ_HANDLERS:
+            return await _confirm_read_planned(
+                req, db=db, current_user=current_user, action_ref=prepared_action
+            )
+        if prepared_action.execute_tool_name in DB_TOOLS | FILE_TOOLS:
+            return await _confirm_planned(
+                req, db=db, current_user=current_user, action_ref=prepared_action
+            )
         return await _confirm_prepared(
             req,
             db=db,

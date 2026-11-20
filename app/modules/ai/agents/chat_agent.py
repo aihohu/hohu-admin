@@ -75,9 +75,11 @@ def create_chat_agent(
     # enabled_extra 控制默认关闭工具的显式启用。
     tools = build_pydantic_ai_tools(user_perms, agent_code, enabled_extra=enabled_extra)
 
-    def instructions(ctx) -> str:
+    async def instructions(ctx) -> str:
         """动态 system prompt（每轮推理时重新构造）"""
         deps = ctx.deps
+        if deps.authorize_model_context is not None:
+            await deps.authorize_model_context()
         agent_system_prompt = getattr(deps.agent, "system_prompt", "") or ""
         prompt = build_system_prompt(agent_system_prompt, deps)
         tool_names = ", ".join(sorted(tool.name for tool in tools)) or "无业务工具"

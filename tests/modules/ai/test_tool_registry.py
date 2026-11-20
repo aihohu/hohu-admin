@@ -30,11 +30,10 @@ from app.modules.system import ai_tools as system_tools_package
 
 
 @pytest.fixture(autouse=True)
-def reset_registry() -> AsyncIterator[None]:
-    """每个测试前后重置 Registry 单例，避免跨测试污染"""
-    ToolRegistry.reset()
+def reset_registry(monkeypatch) -> AsyncIterator[None]:
+    """使用临时空 Registry，退出时恢复原实例，避免跨文件污染。"""
+    monkeypatch.setattr(ToolRegistry, "_instance", ToolRegistry())
     yield
-    ToolRegistry.reset()
 
 
 # ============ AiToolMeta 字段 ============

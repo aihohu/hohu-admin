@@ -58,6 +58,65 @@ def _resource(
 
 
 TENANT_MODEL_INVENTORY: dict[str, TenantResource] = {
+    "sys_field_policy_head": _resource(
+        "sys_field_policy_head",
+        "app.modules.system.models.field_policy:FieldPolicyHead",
+        unique_keys=(("tenant_id",),),
+    ),
+    "sys_field_policy_object_state": _resource(
+        "sys_field_policy_object_state",
+        "app.modules.system.models.field_policy:FieldPolicyObjectState",
+        unique_keys=(("tenant_id", "object_id"),),
+    ),
+    "sys_field_policy_revision": _resource(
+        "sys_field_policy_revision",
+        "app.modules.system.models.field_policy:FieldPolicyRevision",
+        unique_keys=(("tenant_id", "role_id", "object_id", "revision_no"),),
+        relationship_keys=(("tenant_id", "role_id"), ("tenant_id", "object_id")),
+    ),
+    "sys_field_policy_binding": _resource(
+        "sys_field_policy_binding",
+        "app.modules.system.models.field_policy:FieldPolicyBinding",
+        unique_keys=(("tenant_id", "role_id", "object_id"),),
+        relationship_keys=(("tenant_id", "role_id", "object_id", "revision_id"),),
+    ),
+    "sys_field_policy_manifest": _resource(
+        "sys_field_policy_manifest",
+        "app.modules.system.models.field_policy:FieldPolicyManifest",
+        unique_keys=(("tenant_id", "manifest_version"),),
+    ),
+    "sys_field_policy_manifest_item": _resource(
+        "sys_field_policy_manifest_item",
+        "app.modules.system.models.field_policy:FieldPolicyManifestItem",
+        relationship_keys=(
+            ("tenant_id", "manifest_id", "catalog_digest"),
+            (
+                "tenant_id",
+                "role_id",
+                "object_id",
+                "revision_id",
+                "catalog_digest",
+                "rules_digest",
+            ),
+        ),
+    ),
+    "sys_field_policy_audit": _resource(
+        "sys_field_policy_audit",
+        "app.modules.system.models.field_policy:FieldPolicyAudit",
+    ),
+    "sys_field_policy_request": _resource(
+        "sys_field_policy_request",
+        "app.modules.system.models.field_policy:FieldPolicyRequest",
+        unique_keys=(("tenant_id", "actor_user_id", "request_id"),),
+        relationship_keys=(
+            ("tenant_id", "role_id", "object_id", "revision_id"),
+            ("tenant_id", "manifest_id", "manifest_digest"),
+        ),
+    ),
+    "sys_field_policy_migration_map": _resource(
+        "sys_field_policy_migration_map",
+        "app.modules.system.models.field_policy:FieldPolicyMigrationMap",
+    ),
     "ai_conversation": _resource(
         "ai_conversation",
         "app.modules.ai.models.conversation:AiConversation",
@@ -98,6 +157,34 @@ TENANT_MODEL_INVENTORY: dict[str, TenantResource] = {
         "sys_user",
         "app.modules.system.models.user:User",
         unique_keys=(("tenant_id", "user_name"), ("tenant_id", "employee_no")),
+    ),
+    "sys_user_field_policy_state": _resource(
+        "sys_user_field_policy_state",
+        "app.modules.system.models.user_field_policy:UserFieldPolicyState",
+        unique_keys=(("tenant_id",),),
+    ),
+    "sys_user_field_policy_revision": _resource(
+        "sys_user_field_policy_revision",
+        "app.modules.system.models.user_field_policy:UserFieldPolicyRevision",
+        unique_keys=(
+            ("tenant_id", "role_id", "revision_no"),
+            ("tenant_id", "role_id", "revision_id"),
+        ),
+        relationship_keys=(("tenant_id", "role_id"),),
+    ),
+    "sys_user_field_policy_binding": _resource(
+        "sys_user_field_policy_binding",
+        "app.modules.system.models.user_field_policy:UserFieldPolicyBinding",
+        unique_keys=(("tenant_id", "role_id"),),
+        relationship_keys=(
+            ("tenant_id", "role_id"),
+            ("tenant_id", "role_id", "revision_id"),
+        ),
+    ),
+    "sys_user_field_policy_audit": _resource(
+        "sys_user_field_policy_audit",
+        "app.modules.system.models.user_field_policy:UserFieldPolicyAudit",
+        relationship_keys=(("tenant_id", "role_id", "revision_id"),),
     ),
     "sys_role": _resource(
         "sys_role",
@@ -148,6 +235,11 @@ TENANT_MODEL_INVENTORY: dict[str, TenantResource] = {
         "sys_config",
         "app.modules.system.models.config:Config",
         unique_keys=(("tenant_id", "config_key"),),
+    ),
+    "sys_config_publication": _resource(
+        "sys_config_publication",
+        "app.modules.system.models.config_publication:ConfigPublication",
+        relationship_keys=(("tenant_id", "config_id"),),
     ),
     "sys_dict_type": _resource(
         "sys_dict_type",
@@ -207,6 +299,20 @@ TENANT_MODEL_INVENTORY: dict[str, TenantResource] = {
 
 
 PLATFORM_GLOBAL_TABLES: dict[str, PlatformGlobalResource] = {
+    "sys_field_catalog_snapshot": PlatformGlobalResource(
+        "sys_field_catalog_snapshot",
+        "app.modules.system.models.field_policy:FieldCatalogSnapshot",
+        "catalog_digest",
+    ),
+    "sys_field_catalog_object": PlatformGlobalResource(
+        "sys_field_catalog_object",
+        "app.modules.system.models.field_policy:FieldCatalogObject",
+    ),
+    "sys_user_field_policy_global_guard": PlatformGlobalResource(
+        "sys_user_field_policy_global_guard",
+        "app.modules.system.models.user_field_policy:UserFieldPolicyGlobalGuard",
+        "guard_id",
+    ),
     "sys_mail_config": PlatformGlobalResource(
         "sys_mail_config",
         "app.modules.system.models.mail_config:MailConfig",

@@ -220,7 +220,9 @@ class TestImportPreviewArtifacts:
     async def test_same_arguments_create_distinct_preview_artifacts(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        file_loader = AsyncMock(return_value=(b"csv", "users.csv", "text/csv"))
+        file_loader = AsyncMock(
+            return_value=(b"user_name\nalice\n", "users.csv", "text/csv")
+        )
         parser = MagicMock(return_value=[SimpleNamespace(user_name="alice")])
         dry_result = SimpleNamespace(
             new_count=1,

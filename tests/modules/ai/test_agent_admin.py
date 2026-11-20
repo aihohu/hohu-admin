@@ -7,10 +7,23 @@ from httpx import AsyncClient
 
 from app.core.exceptions import BusinessRuleException
 from app.core.tenant import PlatformContext
-from app.main import app
 from app.modules.ai.schemas.agent_admin import AgentAdminUpdateReq
 from app.modules.ai.service.agent_admin import agent_admin_service
-from app.modules.platform.system_agent_auth import require_system_agent_context
+from tests.modules.platform.test_authorization_catalog_http import (
+    catalog_http as catalog_http,
+)
+from tests.modules.platform.test_authorization_catalog_http import (
+    catalog_sessions as catalog_sessions,
+)
+from tests.modules.platform.test_authorization_catalog_http import (
+    http_system as http_system,
+)
+from tests.modules.platform.test_authorization_catalog_http import (
+    plan_sessions as plan_sessions,
+)
+from tests.modules.platform.test_authorization_catalog_http import (
+    system_sessions as system_sessions,
+)
 
 PLATFORM = PlatformContext(
     actor_principal_id=1,
@@ -23,119 +36,44 @@ PLATFORM = PlatformContext(
 )
 
 
-@pytest.fixture(autouse=True)
-def platform_dependency_override():
-    app.dependency_overrides[require_system_agent_context] = lambda: PLATFORM
-    yield
-    app.dependency_overrides.pop(require_system_agent_context, None)
+@pytest.fixture
+async def authed_client(catalog_http):
+    client, _ = catalog_http
+    yield client, client.headers["Authorization"].removeprefix("Bearer ")
 
 
 @pytest.fixture
-async def seed_agents():
-    """Fixture：确保 seed 的 2 行存在且字段确定（独立 committed session + UPSERT + teardown 回滚）.
+async def db_session(catalog_http):
+    _, plain = catalog_http
+    async with plain() as db:
+        yield db
+        await db.rollback()
 
-    Plan 原始版本直接 INSERT 9001/9002，但 CI/本地 dev 已经 seed 过 shared /
-    user_mgmt（unique code 约束），原版会触发 UniqueViolation。这里改为
-    `SELECT ... WHERE code IN (...)`，缺哪个补哪个；测试断言用 code 而非 id，
-    所以补种时 agent_id 用 next_id 即可（不影响断言）.
 
-    对已存在行也更新关键字段（name/description/system_prompt/
-    enabled/risk_appetite）—— 否则 CI 预置的 shared 会带着空 system_prompt
-    和非 `"x"*60` 的 description，让 detail/update 测试不稳定。UPSERT 后无论
-    本地是否跑过 seed_ai_agents.py，断言都能稳定通过.
+@pytest.fixture
+async def seed_agents(catalog_http):
+    """Committed seeds live only in the per-test schema, dropped at teardown."""
+    from sqlalchemy import update
 
-    **关键**：必须用独立 committed session（参考 conftest.seed_test_message），
-    而非 db_session fixture —— 后者绑定 outer transaction + 强制 rollback，
-    API endpoint 的 get_db() 走的是连接池另一条 connection，看不到外层事务里
-    的写入。所以这里：commit 落库 → API 可见 → teardown 精准还原原值/删除新增.
-    新增行用 next_id() 生成，teardown DELETE by agent_id；已存在行 teardown
-    UPDATE 回原值（保留 agent_id / is_builtin / display_order 全程不动）.
-    """
-    from sqlalchemy import delete, select
-
-    from app.core.id_generator import next_id
-    from app.db.session import AsyncSessionLocal, engine
     from app.modules.ai.models.agent import AiAgent
 
-    wanted = {
-        "shared": ("Shared Agent", "x" * 60, "shared prompt", "balanced"),
-        "user_mgmt": ("User Mgmt", "y" * 60, "um prompt", "conservative"),
-    }
-
-    # snapshot 原值用于 teardown 还原；记录新增 agent_id 用于 teardown 删除
-    originals: dict[str, dict] = {}
-    inserted_ids: list[int] = []
-
-    async with AsyncSessionLocal() as s:
-        existing_map = {
-            row.code: row
-            for row in (
-                await s.execute(select(AiAgent).where(AiAgent.code.in_(list(wanted))))
-            )
-            .scalars()
-            .all()
-        }
-        for code, (name, desc, prompt, risk) in wanted.items():
-            if code in existing_map:
-                agent = existing_map[code]
-                # 快照原值（含 agent_id），teardown 还原
-                originals[code] = {
-                    "agent_id": agent.agent_id,
-                    "name": agent.name,
-                    "description": agent.description,
-                    "system_prompt": agent.system_prompt,
-                    "enabled": agent.enabled,
-                    "risk_appetite": agent.risk_appetite,
-                }
-                # UPDATE 可变字段，保留 agent_id / is_builtin / display_order
-                agent.name = name
-                agent.description = desc
-                agent.system_prompt = prompt
-                agent.enabled = True
-                agent.risk_appetite = risk
-            else:
-                new_id = next_id()
-                inserted_ids.append(new_id)
-                s.add(
-                    AiAgent(
-                        agent_id=new_id,
-                        code=code,
-                        name=name,
-                        description=desc,
-                        enabled=True,
-                        is_builtin=True,
-                        display_order=0 if code == "shared" else 1,
-                        system_prompt=prompt,
-                        risk_appetite=risk,
-                    )
+    _, plain = catalog_http
+    async with plain() as db:
+        for code, name, description, prompt in (
+            ("shared", "Shared Agent", "x" * 60, "shared prompt"),
+            ("user_mgmt", "User Mgmt", "y" * 60, "um prompt"),
+        ):
+            await db.execute(
+                update(AiAgent)
+                .where(AiAgent.code == code)
+                .values(
+                    name=name,
+                    description=description,
+                    system_prompt=prompt,
+                    enabled=True,
                 )
-        await s.commit()
-
-    yield
-
-    # teardown：还原已存在行 + 删除新增行（精准 by-id，无 TRUNCATE / 无 WHERE 1=1）
-    async with AsyncSessionLocal() as s:
-        for _code, snap in originals.items():
-            agent = await s.get(AiAgent, snap["agent_id"])
-            if agent is None:
-                continue
-            agent.name = snap["name"]
-            agent.description = snap["description"]
-            agent.system_prompt = snap["system_prompt"]
-            agent.enabled = snap["enabled"]
-            agent.risk_appetite = snap["risk_appetite"]
-        if inserted_ids:
-            await s.execute(delete(AiAgent).where(AiAgent.agent_id.in_(inserted_ids)))
-        await s.commit()
-
-    # 释放连接池：fixture 用独立 AsyncSessionLocal 真实 commit，pool 里的连接
-    # 绑到当前 loop；下个测试 setup 前必须 dispose 避免 "Event loop is closed"
-    # race（参考 conftest.seed_test_message / test_executor_integration.py:99-105）
-    try:
-        await engine.dispose()
-    except RuntimeError as e:
-        if "Event loop is closed" not in str(e):
-            raise
+            )
+        await db.commit()
 
 
 async def _get_agent_id_by_code(client: AsyncClient, code: str) -> str:
@@ -195,7 +133,7 @@ async def test_system_super_role_requires_audit_context_for_agent_api(
     authed_client: tuple[AsyncClient, str],
 ) -> None:
     client, _ = authed_client
-    app.dependency_overrides.pop(require_system_agent_context, None)
+    del client.headers["X-Platform-Reason"]
 
     response = await client.get("/platform/ai/agents")
 

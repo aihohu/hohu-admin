@@ -8,19 +8,20 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_permissions
-from app.core.base_response import PageResult, ResponseModel
+from app.core.base_response import ResponseModel
 from app.core.tenant import TenantContext
+from app.db.authorization_http import business_read, business_write
 from app.db.session import get_db
 from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.user import User
 from app.modules.system.schemas.data_scope_demo import (
     DataScopeDemoCreate,
-    DataScopeDemoOut,
     DataScopeDemoQuery,
     DataScopeDemoUpdate,
 )
-from app.modules.system.service.data_scope_demo_service import (
-    data_scope_demo_service,
+from app.modules.system.schemas.ordinary_projection import (
+    DataScopeDemoProjection,
+    OrdinaryPage,
 )
 
 router = APIRouter()
@@ -28,7 +29,8 @@ router = APIRouter()
 
 @router.get(
     "/list",
-    response_model=ResponseModel[PageResult[DataScopeDemoOut]],
+    response_model=ResponseModel[OrdinaryPage[DataScopeDemoProjection]],
+    response_model_exclude_unset=True,
     summary="获取数据权限演示数据列表",
     description="应用 data_scope 过滤，不同 scope 用户看到不同子集",
     dependencies=[Depends(require_permissions("system:data-scope-demo:list"))],
@@ -40,15 +42,16 @@ async def get_data_scope_demo_list(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """演示数据列表（核心：数据权限过滤生效）"""
-    page_data = await data_scope_demo_service.get_list(
-        db, query, current_user, tenant=tenant
+    page_data = await business_read(
+        db, current_user, tenant=tenant, operation="data-scope-demo.list", query=query
     )
     return ResponseModel.success(data=page_data)
 
 
 @router.post(
     "/add",
-    response_model=ResponseModel[DataScopeDemoOut],
+    response_model=ResponseModel[DataScopeDemoProjection],
+    response_model_exclude_unset=True,
     summary="创建演示数据",
     description="dept_id/create_by 从 current_user 注入，前端无法伪造",
     dependencies=[Depends(require_permissions("system:data-scope-demo:add"))],
@@ -60,17 +63,21 @@ async def add_data_scope_demo(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """创建演示数据"""
-    demo = await data_scope_demo_service.create(
-        db, data_in, current_user, tenant=tenant
+    result = await business_write(
+        db,
+        current_user,
+        tenant=tenant,
+        operation="data-scope-demo.create",
+        payload=data_in,
     )
-    await db.commit()
-    await db.refresh(demo)
+    demo = DataScopeDemoProjection.model_validate(result)
     return ResponseModel.success(data=demo, msg="创建成功")
 
 
 @router.put(
     "/{demo_id}",
-    response_model=ResponseModel[DataScopeDemoOut],
+    response_model=ResponseModel[DataScopeDemoProjection],
+    response_model_exclude_unset=True,
     summary="更新演示数据",
     dependencies=[Depends(require_permissions("system:data-scope-demo:edit"))],
 )
@@ -82,17 +89,22 @@ async def update_data_scope_demo(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """更新演示数据（不允许改 dept_id/create_by）"""
-    demo = await data_scope_demo_service.update(
-        db, demo_id, data_in, current_user, tenant=tenant
+    result = await business_write(
+        db,
+        current_user,
+        tenant=tenant,
+        operation="data-scope-demo.update",
+        payload=data_in,
+        ids=(demo_id,),
     )
-    await db.commit()
-    await db.refresh(demo)
+    demo = DataScopeDemoProjection.model_validate(result)
     return ResponseModel.success(data=demo, msg="更新成功")
 
 
 @router.delete(
     "/{demo_id}",
     response_model=ResponseModel,
+    response_model_exclude_unset=True,
     summary="删除演示数据",
     dependencies=[Depends(require_permissions("system:data-scope-demo:delete"))],
 )
@@ -103,6 +115,11 @@ async def delete_data_scope_demo(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """删除演示数据"""
-    await data_scope_demo_service.delete(db, demo_id, current_user, tenant=tenant)
-    await db.commit()
+    await business_write(
+        db,
+        current_user,
+        tenant=tenant,
+        operation="data-scope-demo.delete",
+        ids=(demo_id,),
+    )
     return ResponseModel.success(msg="删除成功")

@@ -18,7 +18,8 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import redis as redis_module
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
 
 def _reset_redis_client() -> None:
@@ -192,7 +193,7 @@ def mock_visible_agents(monkeypatch):
     fresh/upgrade 的真实 Role-Agent 状态。
     """
     from app.core.exceptions import AuthorizationException
-    from app.modules.ai.api import agent as agent_mod
+    from app.db.authorization_delivery_read_owner import DeliveryReadOwner
     from app.modules.ai.service import agent_visibility as vis_mod
     from app.modules.ai.service import routing_feedback_service as fb_mod
     from app.modules.ai.service.agent_authorization_service import (
@@ -209,7 +210,7 @@ def mock_visible_agents(monkeypatch):
         _make_agent("job_mgmt", "定时任务助手", "cron job", 7),
     ]
 
-    async def _fake_list(db, user):
+    async def _fake_list(db, user, *, force_refresh=False):
         return candidates
 
     async def _fake_authorize(db, user, agent_code, *, error_code="AI_AGENT_FORBIDDEN"):
@@ -221,7 +222,36 @@ def mock_visible_agents(monkeypatch):
             )
         return agent
 
-    monkeypatch.setattr(agent_mod, "list_visible_agents", _fake_list)
+    async def _fake_delivery(_owner, *, tenant, actor_user_version, with_sources=False):
+        rows = [
+            {
+                "agentId": str(a.agent_id),
+                "code": a.code,
+                "name": a.name,
+                "description": a.description,
+                "displayOrder": a.display_order,
+                "fieldPolicy": {
+                    "read": ["name", "description", "display_order"],
+                    "query": ["display_order"],
+                },
+            }
+            for a in candidates
+        ]
+        if with_sources:
+            # This isolates the owner in route unit tests, while the real
+            # candidate source closure is exercised by committed integration.
+            from app.db.authorization_runtime import AuthorizationRuntime
+            from app.db.session import engine
+
+            proof = await AuthorizationRuntime(engine).chat.model_authority(
+                tenant=tenant, actor_user_version=actor_user_version
+            )
+            return {"agents": rows, "field_authority": proof}
+        return rows
+
+    # These route unit tests isolate the actual delivery owner. Integration tests
+    # exercise its G/B and scalar field projection against committed sources.
+    monkeypatch.setattr(DeliveryReadOwner, "agents", _fake_delivery)
     monkeypatch.setattr(vis_mod, "list_visible_agents", _fake_list)
     monkeypatch.setattr(fb_mod, "list_visible_agents", _fake_list)
     monkeypatch.setattr(agent_authorization_service, "list_agents", _fake_list)
@@ -243,11 +273,11 @@ async def seed_test_message(auth_token) -> int:
     from sqlalchemy import delete, select
 
     from app.core.id_generator import next_id
-    from app.db.session import AsyncSessionLocal
     from app.modules.ai.models.agent import AiAgent
     from app.modules.ai.models.conversation import AiConversation
     from app.modules.ai.models.message import AiMessage
     from app.modules.system.models.user import User
+    from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
     async with AsyncSessionLocal() as s:
         user = (
@@ -312,11 +342,11 @@ async def seed_test_message_other_user(auth_token) -> int:
     from sqlalchemy import delete, select
 
     from app.core.id_generator import next_id
-    from app.db.session import AsyncSessionLocal
     from app.modules.ai.models.agent import AiAgent
     from app.modules.ai.models.conversation import AiConversation
     from app.modules.ai.models.message import AiMessage
     from app.modules.system.models.user import User
+    from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
     async with AsyncSessionLocal() as s:
         other = (

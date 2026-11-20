@@ -12,12 +12,11 @@ from app.core.base_response import ResponseModel
 from app.core.exceptions import NotFoundException
 from app.core.redis import redis_client
 from app.core.tenant import get_bound_tenant_context
+from app.db.authorization_http import get_authorization_runtime, release_request_reads
 from app.db.session import get_db
 from app.modules.ai.agents.hitl.query_cache import get_query_cache
 from app.modules.ai.schemas.query_cache import QueryCacheOut
-from app.modules.ai.service.result_projection_service import (
-    result_projection_service,
-)
+from app.modules.auth.service import access_identity
 from app.modules.system.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -47,11 +46,12 @@ async def get_query_cache_endpoint(
     )
     allowed = False
     if entry is not None and entry.user_id == _current_user.user_id:
-        allowed = await result_projection_service.authorize_result_projection(
-            db,
-            _current_user,
-            owner_user_id=entry.user_id,
-            lineage=result_projection_service.lineage_from_record(entry),
+        identity = access_identity(_current_user)
+        await release_request_reads(db)
+        allowed = await get_authorization_runtime().chat.query_cache(
+            tenant=identity.tenant,
+            actor_user_version=identity.user_version,
+            entry=entry,
         )
     if not allowed:
         logger.info(

@@ -16,6 +16,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.id_generator import next_id
@@ -125,6 +126,9 @@ class AiMessage(Base):
         comment="租户ID；必须与所属会话一致",
     )
     tool_codes: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    field_authority: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     subject_refs: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
     subject_refs_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     data_scope_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)

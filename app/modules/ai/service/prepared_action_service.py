@@ -1,5 +1,6 @@
 """Prepared-action freezing and confirmation-time verification."""
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -142,8 +143,16 @@ class PreparedActionService:
         chip_target: str | None = None,
         projection_dependency_message_ids: list[int] | tuple[int, ...] = (),
         require_live_source: bool = False,
+        _planned=None,
+        field_authority=None,
     ) -> AiPreparedAction:
         """Persist one immutable authorization proposal without committing."""
+        # Validated model arguments may contain str/int enums. Persist the same
+        # JSON values and hash, without retaining typed or mutable input objects.
+        try:
+            frozen_args = json.loads(json.dumps(frozen_args, allow_nan=False))
+        except (TypeError, ValueError):
+            raise _binding_invalid("prepared action 参数必须为 JSON 数据") from None
         if conversation_id <= 0 or source_user_message_id <= 0 or not trace_id:
             raise _binding_invalid("prepared action 缺少可信会话或 source message 绑定")
         if resolved_model_id is None or resolved_provider_id is None:
@@ -172,7 +181,36 @@ class PreparedActionService:
         business_snapshot_hash = canonical_payload_hash(snapshot)
         if snapshot_hash and snapshot_hash != business_snapshot_hash:
             raise _binding_invalid("业务方提供的 snapshot hash 与快照不一致")
-        if _as_utc(expires_at) <= datetime.now(UTC):
+        if _planned is not None:
+            tx, key = _planned
+            from app.core.authorization_plan import (  # noqa: PLC0415
+                LockPlan,
+                NewResource,
+                ResourceKey,
+                ResourceKind,
+            )
+
+            tx.assert_session(db)
+            parent = ResourceKey(
+                ResourceKind.CONVERSATION, tenant.tenant_id, conversation_id
+            )
+            tx.assert_planned(
+                LockPlan(
+                    existing=(
+                        parent,
+                        ResourceKey(
+                            ResourceKind.SOURCE_MESSAGE,
+                            tenant.tenant_id,
+                            source_user_message_id,
+                        ),
+                    ),
+                    new=(NewResource(key, parent),),
+                )
+            )
+            now = await tx.database_now()
+        else:
+            now = datetime.now(UTC)
+        if _as_utc(expires_at) <= now:
             raise _snapshot_stale("prepared action 在创建确认前已过期")
 
         tool_codes = [execute_tool_name]
@@ -240,6 +278,7 @@ class PreparedActionService:
                 str(value) for value in lineage.projection_dependency_message_ids
             ],
             presentation=normalized_presentation,
+            field_authority=field_authority,
             user_id=user_id,
             tenant_id=tenant.tenant_id,
             conversation_id=conversation_id,
@@ -254,8 +293,20 @@ class PreparedActionService:
             chip_target=chip_target,
             expires_at=_as_utc(expires_at),
         )
-        db.add(action)
-        await db.flush()
+        if _planned is None:
+            db.add(action)
+            await db.flush()
+        else:
+            values = {
+                column.name: action.__dict__[column.name]
+                for column in AiPreparedAction.__table__.c
+                if column.name in action.__dict__
+                and column.name not in {"action_id", "tenant_id"}
+            }
+            await tx.insert_reserved(key, values)
+            action = await db.get(
+                AiPreparedAction, key.identity[0], populate_existing=True
+            )
         return action
 
     @staticmethod

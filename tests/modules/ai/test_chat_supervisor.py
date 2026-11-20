@@ -18,12 +18,16 @@ def authorize_chat_model_for_endpoint():
     )
     with (
         patch(
-            "app.modules.ai.api.chat.model_authorization_service.authorize_chat_model",
+            "app.modules.ai.api.chat._select_chat_model",
             AsyncMock(return_value=selected),
         ),
         patch(
             "app.modules.ai.api.chat.chat_service.create_agent",
             AsyncMock(return_value=MagicMock(name="fake_exec_agent")),
+        ),
+        patch(
+            "app.modules.ai.api.chat.model_authorization_service.create_model_instance",
+            MagicMock(return_value=object()),
         ),
     ):
         yield
@@ -90,7 +94,7 @@ async def test_image_only_input_still_uses_authorized_supervisor_candidates(
     with (
         patch("app.modules.ai.agents.supervisor.router.agent_router.route", route),
         patch(
-            "app.modules.ai.api.chat.model_authorization_service.authorize_chat_model",
+            "app.modules.ai.api.chat._select_chat_model",
             AsyncMock(return_value=selected),
         ),
     ):
@@ -102,7 +106,10 @@ async def test_image_only_input_still_uses_authorized_supervisor_candidates(
     assert response.status_code == 200
     route.assert_awaited_once()
     assert route.await_args.args[1] == "请描述这张图片"
-    assert route.await_args.args[2] == mock_visible_agents
+    assert [vars(row) for row in route.await_args.args[2]] == [
+        {"code": row.code, "name": row.name, "description": row.description}
+        for row in mock_visible_agents
+    ]
 
 
 async def test_native_image_uses_authorized_candidate_when_business_route_is_unclear(
@@ -135,7 +142,7 @@ async def test_native_image_uses_authorized_candidate_when_business_route_is_unc
             ),
         ),
         patch(
-            "app.modules.ai.api.chat.model_authorization_service.authorize_chat_model",
+            "app.modules.ai.api.chat._select_chat_model",
             AsyncMock(return_value=selected),
         ),
         patch(
@@ -274,13 +281,13 @@ def test_sensitive_tool_failure_suppresses_provider_content_frames() -> None:
 async def test_auto_uses_persisted_user_history_instead_of_client_history(
     client, db_session, auth_token, mock_visible_agents
 ):
-    from sqlalchemy import select
+    from sqlalchemy import delete, select
 
-    from app.db.session import get_db
-    from app.main import app
     from app.modules.ai.models.conversation import AiConversation
     from app.modules.ai.models.message import AiMessage
+    from app.modules.ai.models.routing_log import AiRoutingLog
     from app.modules.system.models.user import User
+    from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
     actor = await db_session.scalar(
         select(User).where(User.tenant_id == 0, User.user_name == "admin")
@@ -291,31 +298,50 @@ async def test_auto_uses_persisted_user_history_instead_of_client_history(
         title="contextual route",
         agent_code="shared",
     )
-    db_session.add(conversation)
-    await db_session.flush()
-    db_session.add_all(
-        [
-            AiMessage(
-                tenant_id=0,
-                conversation_id=conversation.conversation_id,
-                role="user",
-                content="当前有多少用户",
-            ),
-            AiMessage(
-                tenant_id=0,
-                conversation_id=conversation.conversation_id,
-                role="assistant",
-                content="PRIVATE_ASSISTANT_TOOL_RESULT",
-            ),
-        ]
-    )
-    await db_session.flush()
+    async with AsyncSessionLocal() as setup, setup.begin():
+        setup.add(conversation)
+        await setup.flush()
+    conversation_id = conversation.conversation_id
+    async with AsyncSessionLocal() as setup, setup.begin():
+        setup.add_all(
+            [
+                AiMessage(
+                    tenant_id=0,
+                    conversation_id=conversation.conversation_id,
+                    role="user",
+                    content="当前有多少用户",
+                ),
+                AiMessage(
+                    tenant_id=0,
+                    conversation_id=conversation.conversation_id,
+                    role="assistant",
+                    content="PRIVATE_ASSISTANT_TOOL_RESULT",
+                ),
+            ]
+        )
+        await setup.flush()
+        from app.core.tenant import TenantContext
+        from tests.ai_source_fixtures import authored_source
 
-    async def override_db():
-        yield db_session
-
-    previous = app.dependency_overrides.get(get_db)
-    app.dependency_overrides[get_db] = override_db
+        for row in list(
+            await setup.scalars(
+                select(AiMessage).where(
+                    AiMessage.conversation_id == conversation_id,
+                    AiMessage.role == "user",
+                )
+            )
+        ):
+            row.field_authority = await authored_source(
+                setup,
+                tenant=TenantContext(
+                    tenant_id=0,
+                    tenant_code="default",
+                    tenant_version=1,
+                    actor_user_id=actor.user_id,
+                    source="access_token",
+                ),
+                message_id=row.message_id,
+            )
     body = _chat_body(
         "都是哪些", agentCode="auto", conversationId=str(conversation.conversation_id)
     )
@@ -344,10 +370,14 @@ async def test_auto_uses_persisted_user_history_instead_of_client_history(
                 headers={"Authorization": f"Bearer {auth_token}"},
             )
     finally:
-        if previous is None:
-            app.dependency_overrides.pop(get_db, None)
-        else:
-            app.dependency_overrides[get_db] = previous
+        async with AsyncSessionLocal() as cleanup, cleanup.begin():
+            for model in (AiRoutingLog, AiMessage, AiConversation):
+                await cleanup.execute(
+                    delete(model).where(
+                        model.tenant_id == 0,
+                        model.conversation_id == conversation_id,
+                    )
+                )
 
     assert response.status_code == 200
     llm.assert_awaited_once()
@@ -438,7 +468,7 @@ async def test_new_chat_uses_authorized_agent_model_preference(
     selector = AsyncMock(return_value=selected)
 
     with patch(
-        "app.modules.ai.api.chat.model_authorization_service.authorize_chat_model",
+        "app.modules.ai.api.chat._select_chat_model",
         selector,
     ):
         response = await client.post(
@@ -448,7 +478,7 @@ async def test_new_chat_uses_authorized_agent_model_preference(
         )
 
     assert response.status_code == 200
-    assert selector.await_args_list[0].args[1] == preferred
+    assert selector.await_args_list[0].kwargs["model_ref"] == preferred
 
 
 @pytest.mark.asyncio
@@ -471,7 +501,7 @@ async def test_explicit_falsy_model_id_is_rejected_without_fallback(
     )
 
     with patch(
-        "app.modules.ai.api.chat.model_authorization_service.authorize_chat_model",
+        "app.modules.ai.api.chat._select_chat_model",
         selector,
     ):
         response = await client.post(
@@ -482,7 +512,7 @@ async def test_explicit_falsy_model_id_is_rejected_without_fallback(
 
     assert response.status_code == 400
     assert response.json()["errorCode"] == "AI_MODEL_NOT_AVAILABLE"
-    assert selector.await_args_list[0].args[1] == selector_value
+    assert selector.await_args_list[0].kwargs["model_ref"] == selector_value
 
 
 @pytest.mark.parametrize("agent_code", ["", 0, False, None])
@@ -529,7 +559,7 @@ async def test_auto_propagates_model_authorization_failure(
     from app.core.exceptions import BusinessRuleException
 
     with patch(
-        "app.modules.ai.agents.supervisor.router.model_authorization_service.resolve_model_instance",
+        "app.modules.ai.api.chat._select_chat_model",
         AsyncMock(
             side_effect=BusinessRuleException(
                 "所选 AI 模型当前不可用",
@@ -554,12 +584,19 @@ async def test_auto_without_authorized_candidates_returns_agent_not_available(
     auth_token,
     monkeypatch,
 ):
-    from app.modules.ai.service import agent_visibility as visibility_module
+    from app.db.authorization_delivery_read_owner import DeliveryReadOwner
+    from app.db.authorization_runtime import AuthorizationRuntime
+    from app.db.session import engine
 
-    async def no_agents(_db, _user):
+    async def no_agents(_owner, *, tenant, actor_user_version, with_sources=False):
+        if with_sources:
+            proof = await AuthorizationRuntime(engine).chat.model_authority(
+                tenant=tenant, actor_user_version=actor_user_version
+            )
+            return {"agents": [], "field_authority": proof}
         return []
 
-    monkeypatch.setattr(visibility_module, "list_visible_agents", no_agents)
+    monkeypatch.setattr(DeliveryReadOwner, "agents", no_agents)
     response = await client.post(
         "/ai/chat",
         json=_chat_body("hi", agentCode="auto"),
@@ -622,13 +659,17 @@ async def test_legacy_null_mode_uses_default_agent_code(
 
     with (
         patch(
+            "app.modules.ai.agents.supervisor.stickiness.get_ai_config_bool",
+            AsyncMock(side_effect=fake_bool),
+        ),
+        patch(
             "app.modules.ai.agents.safety.ai_config.get_ai_config_bool",
             AsyncMock(side_effect=fake_bool),
         ),
         patch(
             "app.modules.ai.agents.supervisor.router.call_llm_text",
             AsyncMock(side_effect=AssertionError("legacy mode should not call LLM")),
-        ),
+        ) as llm,
     ):
         response = await client.post(
             "/ai/chat",
@@ -636,6 +677,7 @@ async def test_legacy_null_mode_uses_default_agent_code(
             headers={"Authorization": f"Bearer {auth_token}"},
         )
     assert response.status_code == 200
+    llm.assert_not_awaited()
 
 
 @pytest.mark.asyncio

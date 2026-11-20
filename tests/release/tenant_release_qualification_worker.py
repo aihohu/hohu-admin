@@ -25,7 +25,7 @@ from app.core.rbac import is_system_admin
 from app.core.redis import redis_client
 from app.core.security import create_access_token
 from app.core.tenant import PlatformContext
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.model_policy import TenantAiModelPolicy
 from app.modules.ai.models.provider import AiProvider
@@ -43,6 +43,7 @@ from app.modules.system.models.role import Role
 from app.modules.system.models.tenant import Tenant
 from app.modules.system.models.user import User
 from app.modules.system.service.tenant_lifecycle_service import tenant_lifecycle_service
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
 _CORRELATION_PREFIX = "plan7c-qualification-"
 

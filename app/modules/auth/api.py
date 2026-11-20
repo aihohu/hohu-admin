@@ -1,34 +1,27 @@
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.params import Query
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants import MENU_TYPE_DIRECTORY, MENU_TYPE_MENU, STATUS_ENABLED
 from app.constants.static_routes import CONSTANT_ROUTES
-from app.core.auth import is_super_admin
 from app.core.base_response import ResponseModel
 from app.core.config import settings
 from app.core.exceptions import (
     AuthenticationException,
 )
-from app.core.rbac import is_system_admin
-from app.db.session import get_db
-from app.modules.auth.permission_collect import (
-    collect_user_buttons,
-    collect_user_menus,
+from app.db.authorization_http import (
+    get_authorization_runtime,
+    login_http,
+    relation_read,
+    user_read,
 )
-from app.modules.auth.schemas.auth import LoginCredentials, RouteMeta, UserRoute
+from app.db.session import get_db
+from app.modules.auth.schemas.auth import LoginCredentials
 from app.modules.auth.self_service_api import router as self_service_router
 from app.modules.auth.service import (
-    auth_service,
-    build_menu_tree,
     get_current_user,
-    refresh_access_token,
 )
 from app.modules.auth.service import logout as do_logout
-from app.modules.system.constants import PLATFORM_ONLY_TENANT_ROUTE_NAMES
-from app.modules.system.models.menu import Menu
 from app.modules.system.models.user import User
 from app.utils.ip_util import get_client_ip
 
@@ -72,13 +65,14 @@ async def login(
     """
     ip = get_client_ip(request)
     user_agent = request.headers.get("User-Agent")
-    return await auth_service.authenticate(
-        credentials,
+    data = await login_http(
         db,
+        credentials,
         ip=ip,
         user_agent=user_agent,
         host=request.headers.get("Host"),
     )
+    return ResponseModel.success(data=data)
 
 
 @router.post(
@@ -132,7 +126,7 @@ async def refresh_token(
     refresh = body.get("refreshToken", "")
     if not refresh:
         raise AuthenticationException("缺少 refreshToken", error_code="TOKEN_EXPIRED")
-    new_access, new_refresh = await refresh_access_token(refresh)
+    new_access, new_refresh = await get_authorization_runtime().refresh(refresh)
     return ResponseModel.success(
         data={"token": new_access, "refreshToken": new_refresh}
     )
@@ -153,12 +147,12 @@ async def login_for_docs(
         user_name=form.username,
         password=form.password,
     )
-    result = await auth_service.authenticate(
-        credentials,
+    result = await login_http(
         db,
+        credentials,
         host=request.headers.get("Host"),
     )
-    token = result.data["token"]
+    token = result["token"]
     return {"access_token": token, "token_type": "bearer"}
 
 
@@ -171,7 +165,9 @@ async def login_for_docs(
         401: {"description": "未登录或令牌已过期"},
     },
 )
-async def get_user_info(current_user: User = Depends(get_current_user)):
+async def get_user_info(
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
     """
     获取当前登录用户信息
 
@@ -194,35 +190,8 @@ async def get_user_info(current_user: User = Depends(get_current_user)):
             }
         }
     """
-    # 提取角色编码列表 (如: ['R_ADMIN', 'R_USER'])
-    roles = [
-        role.role_code for role in current_user.roles if role.status == STATUS_ENABLED
-    ]
-
-    permissions = collect_user_buttons(current_user)
-
-    # Keep '*' for ordinary UI gates and exact codes for destructive composition.
-    if is_super_admin(current_user):
-        return ResponseModel.success(
-            data={
-                "userId": str(current_user.user_id),
-                "userName": current_user.user_name,
-                "userAvatar": current_user.user_avatar or "",
-                "isSystemAdmin": is_system_admin(current_user),
-                "roles": roles,
-                "buttons": ["*", *permissions],
-            }
-        )
-
     return ResponseModel.success(
-        data={
-            "userId": str(current_user.user_id),
-            "userName": current_user.user_name,
-            "userAvatar": current_user.user_avatar or "",
-            "isSystemAdmin": is_system_admin(current_user),
-            "roles": roles,
-            "buttons": permissions,
-        }
+        data=await user_read(db, current_user, operation="auth")
     )
 
 
@@ -240,90 +209,8 @@ async def get_user_routes(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    获取当前用户的动态路由树
-
-    Args:
-        current_user: 当前登录用户对象（通过 JWT 令牌验证）
-
-    Returns:
-        ResponseModel: 包含 home 路由和 routes 路由树的数据
-
-    Note:
-        - 仅返回菜单(M)和目录(D)类型的路由
-        - 仅返回状态为启用的路由
-        - 自动构建树形结构供前端路由使用
-        - 超级管理员直接查询所有启用菜单，无需通过角色关联
-    """
-    if is_super_admin(current_user):
-        result = await db.execute(
-            select(Menu).where(
-                Menu.tenant_id == current_user.tenant_id,
-                Menu.menu_type.in_([MENU_TYPE_DIRECTORY, MENU_TYPE_MENU]),
-                Menu.status == STATUS_ENABLED,
-            )
-        )
-        menu_list = list(result.scalars().all())
-    else:
-        menu_list = collect_user_menus(current_user)
-
-    menu_list = [
-        menu
-        for menu in menu_list
-        if menu.route_name not in PLATFORM_ONLY_TENANT_ROUTE_NAMES
-    ]
-
-    route_tree = build_menu_tree(menu_list, 0)
-    if is_system_admin(current_user):
-        route_tree.append(
-            UserRoute(
-                name="tenant",
-                path="/tenant",
-                component="layout.base$view.tenant",
-                meta=RouteMeta(
-                    title="租户管理",
-                    i18n_key="route.tenant",
-                    icon="ph:buildings",
-                    order=3,
-                ),
-            )
-        )
-        agent_route = UserRoute(
-            name="ai_agent",
-            path="/ai/agent",
-            component="view.ai_agent",
-            meta=RouteMeta(
-                title="Agent 管理", i18n_key="route.ai_agent", icon="ph:robot", order=2
-            ),
-        )
-        provider_route = UserRoute(
-            name="ai_provider",
-            path="/ai/provider",
-            component="view.ai_provider",
-            meta=RouteMeta(
-                title="模型管理",
-                i18n_key="route.ai_provider",
-                icon="carbon:settings-adjust",
-                order=1,
-            ),
-        )
-        ai_route = next((route for route in route_tree if route.name == "ai"), None)
-        if ai_route is None:
-            ai_route = UserRoute(
-                name="ai",
-                path="/ai",
-                component="layout.base",
-                meta=RouteMeta(title="AI 管理", i18n_key="route.ai", icon="ph:robot"),
-                children=[],
-            )
-            route_tree.append(ai_route)
-        ai_route.children = [*(ai_route.children or []), provider_route, agent_route]
-
     return ResponseModel.success(
-        data={
-            "home": "ai_chat",
-            "routes": route_tree,
-        }
+        data=await relation_read(db, current_user, operation="runtime.routes")
     )
 
 
@@ -354,40 +241,21 @@ async def get_constant_routes():
     },
 )
 async def is_route_exist(
-    route_name: str = Query(..., description="前端路由名称", examples=["system"]),
+    route_name: str = Query(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="前端路由名称",
+        examples=["system"],
+    ),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    检查路由名称是否存在
-
-    Args:
-        route_name: 前端路由名称（如：'system', 'user'）
-        db: 异步数据库会话
-
-    Returns:
-        ResponseModel: 包含布尔值的数据，true 表示路由已存在，false 表示不存在
-
-    Examples:
-        >>> is_route_exist(route_name="system")
-        {
-            "code": 200,
-            "msg": "success",
-            "data": true
-        }
-    """
-    if route_name in {"ai_provider", "ai_agent", "tenant"}:
-        return ResponseModel.success(data=is_system_admin(current_user))
-    if route_name in PLATFORM_ONLY_TENANT_ROUTE_NAMES:
-        return ResponseModel.success(data=False)
-
-    stmt = select(Menu).where(
-        Menu.tenant_id == current_user.tenant_id,
-        Menu.route_name == route_name,
+    return ResponseModel.success(
+        data=await relation_read(
+            db, current_user, operation="runtime.exists", query=route_name
+        )
     )
-    result = await db.execute(stmt)
-    exists = result.scalars().first() is not None
-    return ResponseModel.success(data=exists)
 
 
 @router.get("/login-options", summary="读取公开登录定位方式")

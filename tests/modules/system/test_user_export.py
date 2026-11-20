@@ -18,6 +18,7 @@ import json as _json
 
 import pytest
 from openpyxl import load_workbook
+from sqlalchemy import insert
 from sqlalchemy import select as _select
 from sqlalchemy import text as _text
 
@@ -29,6 +30,7 @@ from app.constants import (
 )
 from app.core.exceptions import BusinessRuleException, NotFoundException
 from app.core.file_storage import MockFileStorage
+from app.db.base import user_depts, user_roles
 from app.modules.system.constants import (
     EXPORT_ALLOWED_FIELDS,
     USER_EXPORT_ASYNC_THRESHOLD,
@@ -116,6 +118,54 @@ def _make_user(
         roles=roles,
         depts=depts or [],
     )
+
+
+async def _seed_bulk_users(
+    db,
+    *,
+    first_id: int,
+    prefix: str,
+    width: int,
+    role_id: int,
+    dept_id: int,
+    count: int = USER_EXPORT_ASYNC_THRESHOLD + 1,
+) -> None:
+    """Seed real threshold rows in the caller's rollback-owned transaction."""
+    ids = range(first_id, first_id + count)
+    # RETURNING enables asyncpg's paged insertmanyvalues path. Return only IDs,
+    # not ORM instances; their order is irrelevant to this fixture.
+    await db.execute(
+        insert(User.__table__).returning(User.user_id),
+        [
+            {
+                "tenant_id": TENANT.tenant_id,
+                "user_id": uid,
+                "user_name": f"{prefix}{index:0{width}d}",
+                "hashed_password": "secret-hash-never-export",
+                "nickname": "Nick",
+                "user_gender": "0",
+                "status": "1",
+            }
+            for index, uid in enumerate(ids)
+        ],
+    )
+    await db.execute(
+        insert(user_roles).returning(user_roles.c.user_id),
+        [
+            {"tenant_id": TENANT.tenant_id, "user_id": uid, "role_id": role_id}
+            for uid in ids
+        ],
+    )
+    await db.execute(
+        insert(user_depts).returning(user_depts.c.user_id),
+        [
+            {"tenant_id": TENANT.tenant_id, "user_id": uid, "dept_id": dept_id}
+            for uid in ids
+        ],
+    )
+    # Background analyze cannot see this uncommitted bulk fixture. Fresh local
+    # estimates prevent tiny-table plans from being used for 5001 real users.
+    await db.execute(_text("ANALYZE sys_user, sys_user_role, sys_user_dept"))
 
 
 @pytest.fixture
@@ -434,17 +484,14 @@ class TestExportThreshold:
         await db_session.flush()
 
         # 制造 USER_EXPORT_ASYNC_THRESHOLD + 1 个用户
-        bulk_users = [
-            _make_user(
-                6702 + i,
-                f"QA_EXP_BULK_{i:05d}",
-                [super_role],
-                [dept],
-            )
-            for i in range(USER_EXPORT_ASYNC_THRESHOLD + 1)
-        ]
-        db_session.add_all(bulk_users)
-        await db_session.flush()
+        await _seed_bulk_users(
+            db_session,
+            first_id=6702,
+            prefix="QA_EXP_BULK_",
+            width=5,
+            role_id=super_role.role_id,
+            dept_id=dept.dept_id,
+        )
 
         with pytest.raises(BusinessRuleException) as exc:
             await export_users_to_excel(
@@ -556,17 +603,14 @@ class TestExportFailureRecordsError:
         db_session.add_all([dept, operator])
         await db_session.flush()
 
-        bulk_users = [
-            _make_user(
-                7002 + i,
-                f"QA_EXP_FAIL_{i:05d}",
-                [super_role],
-                [dept],
-            )
-            for i in range(USER_EXPORT_ASYNC_THRESHOLD + 1)
-        ]
-        db_session.add_all(bulk_users)
-        await db_session.flush()
+        await _seed_bulk_users(
+            db_session,
+            first_id=7002,
+            prefix="QA_EXP_FAIL_",
+            width=5,
+            role_id=super_role.role_id,
+            dept_id=dept.dept_id,
+        )
 
         with pytest.raises(BusinessRuleException):
             await export_users_to_excel(
@@ -770,12 +814,14 @@ class TestDownloadExportFile:
         await db_session.flush()
 
         # 制造 FAILED task（超阈值）
-        bulk_users = [
-            _make_user(6952 + i, f"QA_EXP_DL_F_{i:04d}", [super_role], [dept])
-            for i in range(USER_EXPORT_ASYNC_THRESHOLD + 1)
-        ]
-        db_session.add_all(bulk_users)
-        await db_session.flush()
+        await _seed_bulk_users(
+            db_session,
+            first_id=6952,
+            prefix="QA_EXP_DL_F_",
+            width=4,
+            role_id=super_role.role_id,
+            dept_id=dept.dept_id,
+        )
 
         with pytest.raises(BusinessRuleException):
             await export_users_to_excel(

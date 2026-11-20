@@ -30,10 +30,11 @@ async def seed_role_agents():
 
     from app.core.id_generator import next_id
     from app.core.tenant import DEFAULT_TENANT_ID
-    from app.db.session import AsyncSessionLocal, engine
+    from app.db.session import engine
     from app.modules.ai.models.agent import AiAgent
     from app.modules.ai.models.role_ai_agent import RoleAiAgent
     from app.modules.system.models.role import Role
+    from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
     wanted = {
         "shared": ("Shared Agent", "x" * 60, "shared prompt", "balanced"),
@@ -202,9 +203,9 @@ async def test_get_projects_role_tool_permissions_without_granting_them(
     from sqlalchemy import select
 
     from app.db.base import role_menus
-    from app.db.session import AsyncSessionLocal
     from app.modules.ai.agents.tools import load_builtin_tools
     from app.modules.system.models.menu import Menu
+    from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
     load_builtin_tools()
     client, _ = authed_client
@@ -348,8 +349,8 @@ async def test_put_normalizes_soft_disabled_to_enabled(
     """
     from sqlalchemy import select
 
-    from app.db.session import AsyncSessionLocal
     from app.modules.ai.models.role_ai_agent import RoleAiAgent
+    from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
     client, _ = authed_client
     role_id = seed_role_agents["role_id"]
@@ -443,8 +444,8 @@ async def test_put_triggers_audit_middleware(
     """
     from sqlalchemy import delete, select
 
-    from app.db.session import AsyncSessionLocal
     from app.modules.system.models.operation_log import SysOperationLog
+    from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
     client, _ = authed_client
     role_id = seed_role_agents["role_id"]

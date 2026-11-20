@@ -15,13 +15,19 @@ web 进程（APP_ROLE=api）通过 Redis pub/sub 通知本进程。
 import asyncio
 import logging
 import signal
+from contextlib import AsyncExitStack
+
+from anyio import CancelScope
 
 import app.tasks  # noqa: F401  # 触发 @register_task 装饰器
+from app.core.config import settings
+from app.core.process_admission import ProcessAdmission
 from app.core.redis import close_redis
 from app.core.scheduler import scheduler_manager
 from app.core.tenant import PlatformContext
-from app.db.session import AsyncSessionLocal
+from app.core.write_admission import require_open, write_admission
 from app.modules.job.job_runner import RUNNER_ID
+from app.modules.job.log_monitor import JobLogMonitor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,7 +36,8 @@ logging.basicConfig(
 logger = logging.getLogger("scheduler_worker")
 
 
-async def _run() -> None:
+async def _run() -> PlatformContext:
+    require_open()
     platform = PlatformContext(
         actor_principal_id=0,
         actor_name="scheduler-worker",
@@ -40,17 +47,25 @@ async def _run() -> None:
         ticket_id="SYSTEM-SCHEDULER",
         correlation_id=f"scheduler:{RUNNER_ID}",
     )
-    async with AsyncSessionLocal() as db:
-        await scheduler_manager.reload_jobs(db, platform=platform)
+    await scheduler_manager.reload_jobs(platform=platform)
     await scheduler_manager.start_with_pubsub(platform=platform)
-    logger.info("Scheduler worker 已就绪")
+    return platform
 
 
 async def main() -> None:
     stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    process = ProcessAdmission(
+        write_admission,
+        role="scheduler",
+        build_sha=settings.RELEASE_BUILD_SHA,
+        stop_callbacks=(scheduler_manager.stop,),
+    )
 
     def _request_stop(*_args: object) -> None:
-        stop_event.set()
+        # Wake the selector even after all scheduler/background IO has drained.
+        # Event.set alone does not wake an idle loop from a signal handler.
+        loop.call_soon_threadsafe(stop_event.set)
 
     # SIGINT 在 Windows/Linux 都可用；SIGTERM 仅 POSIX，Windows 下注册不会报错但无效
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -59,13 +74,24 @@ async def main() -> None:
         except (OSError, ValueError):
             pass
 
+    cleanup = AsyncExitStack()
+    cleanup.push_async_callback(close_redis)
+    cleanup.push_async_callback(process.stop)
+    cleanup.push_async_callback(scheduler_manager.stop)
     try:
-        await _run()
+        await process.start()
+        platform = await _run()
+        monitor = JobLogMonitor(platform=platform, runner_id=RUNNER_ID)
+        cleanup.push_async_callback(monitor.stop)
+        process.stop_callbacks.append(monitor.stop)
+        await monitor.start()
+        logger.info("Scheduler worker 已就绪")
         await stop_event.wait()
     finally:
         logger.info("Scheduler worker 收到退出信号，正在关闭")
-        scheduler_manager.shutdown()
-        await close_redis()
+        with CancelScope(shield=True):
+            async with asyncio.timeout(75):
+                await cleanup.aclose()
         logger.info("Scheduler worker 已退出")
 
 

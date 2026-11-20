@@ -1,8 +1,6 @@
 """Typed tenant settings with atomic group writes and explicit secret handling."""
 
-import hashlib
 import hmac
-import json
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +12,7 @@ from app.modules.system.models.setting import SystemSetting
 from app.modules.system.models.tenant import Tenant
 from app.modules.system.service.account_service import account_service
 from app.modules.system.service.mail_service import mail_service, ready
+from app.modules.system.service.parameter_setting_facts import setting_snapshot
 from app.modules.system.settings_catalog import (
     ALLOWED_UPLOAD_EXTENSIONS,
     SETTING_GROUPS,
@@ -100,6 +99,22 @@ class SettingsService:
         value = result.scalar_one_or_none()
         return value if value is not None else default
 
+    async def get_bool(
+        self,
+        db: AsyncSession,
+        key: str,
+        default: bool = False,
+        *,
+        tenant: TenantContext,
+    ) -> bool:
+        """Read a preview fact without acquiring a writer's Setting lock."""
+        value = await self.get_value(db, key, tenant=tenant)
+        return (
+            default
+            if value is None
+            else value.strip().lower() in {"true", "1", "yes", "on"}
+        )
+
     async def get_bool_for_update(
         self,
         db: AsyncSession,
@@ -156,13 +171,7 @@ class SettingsService:
         values = await self.values(db, tenant_id=tenant.tenant_id)
         definitions = [d for d in SETTINGS.values() if d.group == group]
         group_values = {d.key: values[d.key] for d in definitions}
-        revision = hmac.new(
-            settings.SECRET_KEY.encode(),
-            json.dumps(
-                [tenant.tenant_id, group, group_values], sort_keys=True
-            ).encode(),
-            hashlib.sha256,
-        ).hexdigest()
+        _, revision = await setting_snapshot(db, tenant.tenant_id, group)
         secrets = [d.key for d in definitions if d.kind == "secret"]
         configured_secrets = [key for key in secrets if group_values[key]]
         for key in secrets:

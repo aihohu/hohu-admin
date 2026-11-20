@@ -87,7 +87,7 @@ async def test_injection_blocks_before_routing(
             AsyncMock(return_value=fake_exec_agent),
         ),
         patch(
-            "app.modules.ai.api.chat.model_authorization_service.authorize_chat_model",
+            "app.modules.ai.api.chat._select_chat_model",
             AsyncMock(return_value=selected_model),
         ),
     ):

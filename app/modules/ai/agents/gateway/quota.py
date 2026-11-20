@@ -28,6 +28,7 @@ from redis.asyncio import Redis
 
 from app.core.exceptions import BusinessRuleException
 from app.core.tenant import TenantContext
+from app.modules.ai.agents.gateway.auxiliary_budget import bounded_auxiliary
 from app.modules.ai.agents.tools.meta import AiToolMeta
 
 logger = logging.getLogger(__name__)
@@ -55,82 +56,51 @@ _CFG_L4_CONV = "ai:budget:conv_per_day"
 
 
 async def _resolve_l1_limit(tenant: TenantContext) -> int:
-    """从 sys_config 读 L1 速率上限（60s 缓存兜底，DB down 用 default）"""
-    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
-    from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
-        get_ai_config_int,
-    )
+    from app.db.authorization_http import get_authorization_runtime  # noqa: PLC0415
 
     try:
-        async with AsyncSessionLocal() as db:
-            return await get_ai_config_int(
-                db, _CFG_L1_RATE, DEFAULT_L1_RATE_PER_MIN, tenant=tenant
-            )
+        values = await get_authorization_runtime().auxiliary.options(tenant=tenant)
+        return values[_CFG_L1_RATE]
     except Exception:
         return DEFAULT_L1_RATE_PER_MIN
 
 
 async def _resolve_l2_limit(tenant: TenantContext) -> int:
-    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
-    from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
-        get_ai_config_int,
-    )
+    from app.db.authorization_http import get_authorization_runtime  # noqa: PLC0415
 
     try:
-        async with AsyncSessionLocal() as db:
-            return await get_ai_config_int(
-                db, _CFG_L2_QUOTA, DEFAULT_L2_DAILY_QUOTA, tenant=tenant
-            )
+        values = await get_authorization_runtime().auxiliary.options(tenant=tenant)
+        return values[_CFG_L2_QUOTA]
     except Exception:
         return DEFAULT_L2_DAILY_QUOTA
 
 
 async def _resolve_l3_timeout(tenant: TenantContext) -> int:
-    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
-    from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
-        get_ai_config_int,
-    )
+    from app.db.authorization_http import get_authorization_runtime  # noqa: PLC0415
 
     try:
-        async with AsyncSessionLocal() as db:
-            return await get_ai_config_int(
-                db, _CFG_L3_TIMEOUT, DEFAULT_L3_TIMEOUT_SEC, tenant=tenant
-            )
+        values = await get_authorization_runtime().auxiliary.options(tenant=tenant)
+        return values[_CFG_L3_TIMEOUT]
     except Exception:
         return DEFAULT_L3_TIMEOUT_SEC
 
 
 async def _resolve_l1_global_limit(tenant: TenantContext) -> int:
-    """从 sys_config 读取全局写速率上限，0 表示不限。"""
-    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
-    from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
-        get_ai_config_int,
-    )
+    from app.db.authorization_http import get_authorization_runtime  # noqa: PLC0415
 
     try:
-        async with AsyncSessionLocal() as db:
-            return await get_ai_config_int(
-                db,
-                _CFG_L1_GLOBAL_RATE,
-                DEFAULT_L1_GLOBAL_RATE_PER_MIN,
-                tenant=tenant,
-            )
+        values = await get_authorization_runtime().auxiliary.options(tenant=tenant)
+        return values[_CFG_L1_GLOBAL_RATE]
     except Exception:
         return DEFAULT_L1_GLOBAL_RATE_PER_MIN
 
 
 async def _resolve_l4_conv_budget(tenant: TenantContext) -> int:
-    """从 sys_config 读取会话写预算，0 表示不限。"""
-    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
-    from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
-        get_ai_config_int,
-    )
+    from app.db.authorization_http import get_authorization_runtime  # noqa: PLC0415
 
     try:
-        async with AsyncSessionLocal() as db:
-            return await get_ai_config_int(
-                db, _CFG_L4_CONV, DEFAULT_L4_CONV_BUDGET, tenant=tenant
-            )
+        values = await get_authorization_runtime().auxiliary.options(tenant=tenant)
+        return values[_CFG_L4_CONV]
     except Exception:
         return DEFAULT_L4_CONV_BUDGET
 
@@ -167,6 +137,7 @@ def is_write_tool(meta: AiToolMeta) -> bool:
     return meta.risk in ("high", "destructive") or meta.hitl_always
 
 
+@bounded_auxiliary()
 async def check_l1_rate_limit(
     redis: Redis,
     user_id: int,
@@ -219,6 +190,7 @@ async def check_l1_rate_limit(
     return count_int, member
 
 
+@bounded_auxiliary()
 async def check_l1_global_rate_limit(
     redis: Redis,
     *,
@@ -269,6 +241,7 @@ async def check_l1_global_rate_limit(
     return count_int, member
 
 
+@bounded_auxiliary()
 async def check_l2_daily_quota(
     redis: Redis,
     user_id: int,
@@ -322,6 +295,7 @@ async def check_l2_daily_quota(
     return int(incr_result)
 
 
+@bounded_auxiliary()
 async def check_l2_agent_quota(
     redis: Redis,
     user_id: int,
@@ -383,6 +357,7 @@ async def check_l2_agent_quota(
     return int(incr_result)
 
 
+@bounded_auxiliary()
 async def check_l4_conv_budget(
     redis: Redis,
     conversation_id: int,
@@ -447,6 +422,7 @@ async def check_l4_conv_budget(
     return int(incr_result), conv_key
 
 
+@bounded_auxiliary(best_effort=True)
 async def decr_quota(
     redis: Redis,
     user_id: int,

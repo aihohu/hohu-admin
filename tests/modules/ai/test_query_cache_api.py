@@ -10,6 +10,23 @@ from app.core.exceptions import NotFoundException
 from app.modules.ai.api.query_cache import get_query_cache_endpoint
 
 
+@pytest.fixture
+def protected_cache(monkeypatch):
+    owner = SimpleNamespace(query_cache=AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        "app.modules.ai.api.query_cache.get_authorization_runtime",
+        lambda: SimpleNamespace(chat=owner),
+    )
+    monkeypatch.setattr(
+        "app.modules.ai.api.query_cache.access_identity",
+        lambda user: SimpleNamespace(tenant=user._tenant_context, user_version=1),
+    )
+    monkeypatch.setattr(
+        "app.modules.ai.api.query_cache.release_request_reads", AsyncMock()
+    )
+    return owner
+
+
 def _user():
     return SimpleNamespace(
         user_id=101,
@@ -38,15 +55,13 @@ def _entry(*, user_id: int = 101):
 
 
 @pytest.mark.parametrize("entry", [None, _entry(user_id=999), _entry()])
-async def test_missing_owner_mismatch_and_revoked_projection_share_404(entry) -> None:
+async def test_missing_owner_mismatch_and_revoked_projection_share_404(
+    entry, protected_cache
+) -> None:
     with (
         patch(
             "app.modules.ai.api.query_cache.get_query_cache",
             AsyncMock(return_value=entry),
-        ),
-        patch(
-            "app.modules.ai.api.query_cache.result_projection_service.authorize_result_projection",
-            AsyncMock(return_value=False),
         ),
     ):
         with pytest.raises(NotFoundException) as exc_info:
@@ -58,18 +73,20 @@ async def test_missing_owner_mismatch_and_revoked_projection_share_404(entry) ->
             )
 
     assert exc_info.value.error_code == "AI_QUERY_CACHE_NOT_FOUND"
+    assert protected_cache.query_cache.await_count == int(
+        entry is not None and entry.user_id == 101
+    )
 
 
-async def test_authorized_owner_receives_safe_navigation_filters() -> None:
+async def test_authorized_owner_receives_safe_navigation_filters(
+    protected_cache,
+) -> None:
     entry = _entry()
+    protected_cache.query_cache.return_value = True
     with (
         patch(
             "app.modules.ai.api.query_cache.get_query_cache",
             AsyncMock(return_value=entry),
-        ),
-        patch(
-            "app.modules.ai.api.query_cache.result_projection_service.authorize_result_projection",
-            AsyncMock(return_value=True),
         ),
     ):
         result = await get_query_cache_endpoint(
