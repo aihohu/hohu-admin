@@ -51,19 +51,27 @@ async def system_sessions(plan_sessions):
                 for p in entry.permissions
             }
         )
-        for index, permission in enumerate(permissions, 1001):
+        if permissions:
             await db.execute(
-                insert(Menu).values(
-                    tenant_id=0,
-                    menu_id=index,
-                    menu_name=permission,
-                    menu_type="F",
-                    status="1",
-                    permission=permission,
-                )
+                insert(Menu).returning(Menu.menu_id),
+                [
+                    {
+                        "tenant_id": 0,
+                        "menu_id": index,
+                        "menu_name": permission,
+                        "menu_type": "F",
+                        "status": "1",
+                        "permission": permission,
+                    }
+                    for index, permission in enumerate(permissions, 1001)
+                ],
             )
             await db.execute(
-                insert(role_menus).values(tenant_id=0, role_id=201, menu_id=index)
+                insert(role_menus).returning(role_menus.c.menu_id),
+                [
+                    {"tenant_id": 0, "role_id": 201, "menu_id": index}
+                    for index in range(1001, 1001 + len(permissions))
+                ],
             )
         await db.commit()
     return plan_sessions
