@@ -9,6 +9,7 @@ import pytest
 
 from app.core.exceptions import BusinessException
 from app.core.field_policy import Catalog
+from app.core.field_policy.console_origin import console_authority
 from app.core.field_policy.documents import load_rules
 from app.modules.system.field_policy.generic_compat import user_compat_object
 from tools.ops.policy_preparation_identity import PreparationSessions
@@ -93,6 +94,53 @@ async def test_failed_login_fence_invalidates_all_preparation_sessions(
         await controller.login({})
     assert controller.finished.is_set()
     assert controller.identities.tokens == {}
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        None,
+        "",
+        "http://admin.example",
+        "https://a/path",
+        "https://user@a",
+        "https://a/#b",
+        "https://a:0",
+        "https://a:65536",
+    ],
+)
+def test_console_configuration_requires_one_canonical_origin(origin):
+    with pytest.raises(ValueError):
+        console_authority(origin)
+
+
+async def test_explicit_console_host_and_origin_survive_tls_proxy():
+    class Controller:
+        async def login(self, _):
+            return {"accepted": True}
+
+    origin = "https://admin.example:9443"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(
+            app=create_app(Controller(), console_origin=origin)
+        ),
+        base_url="http://127.0.0.1:9527",
+    ) as client:
+        path = "/policy-prepare/login"
+        headers = {"Host": "admin.example:9443", "Origin": origin}
+        assert (await client.post(path, headers=headers, json={})).status_code == 200
+        for duplicate in (("Host", "localhost"), ("Origin", "https://other.example")):
+            response = await client.post(
+                path, headers=[*headers.items(), duplicate], json={}
+            )
+            assert response.status_code == 403
+        for changes in (
+            {"Origin": "https://other.example"},
+            {"Host": "localhost", "X-Forwarded-Host": "admin.example:9443"},
+        ):
+            assert (
+                await client.post(path, headers=headers | changes, json={})
+            ).status_code == 403
 
 
 async def test_cross_origin_and_rebinding_are_rejected_before_login():

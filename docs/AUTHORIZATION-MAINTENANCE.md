@@ -207,6 +207,6 @@ python -m scripts.reconcile_ai_legacy --tenant-id TENANT_ID --operator-id USER_I
 
 ## 维护周期记录
 
-进入策略准备的stop记录保留policy_prepare_required要求；缺少准备文件、无效完成状态或安装回执不匹配均不能改走普通resume。当前资格、准备进程退出、完整租户状态与数据库静止条件见[字段策略管理](FIELD-POLICY-MANAGEMENT.md)。
+受控安装从首次写入 stop 起即记录 `policy_prepare_required`，迁移或种子中途失败也保留该要求。恢复核验原始安装回执及其绑定的准备记录。绑定后台 origin 的 schema 4 记录还包含原地址、Web 提交和构建清单摘要。完整租户状态、当前资格、进程退出和数据库静止条件见[字段策略管理](FIELD-POLICY-MANAGEMENT.md)。
 
 显式resume先把当前固定policy-prepare.json、install.json和stop.json按stop原始SHA256保存到受保护completed目录并核对字节；恢复数据库admission后消费当前文件，stop最后删除。归档不覆盖已有不同内容，失败会请求重新关闭数据库并恢复缺失原记录。归档只保存本轮证据，不授予下一轮维护资格。下一轮在同一共享控制目录创建新的stop记录；无需更换部署平台或丢弃历史回执。

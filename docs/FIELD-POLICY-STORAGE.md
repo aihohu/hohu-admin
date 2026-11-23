@@ -34,7 +34,7 @@ publish/archive 回执返回 `revisionId`，请求事实以完整 tenant/role/ob
 
 ## 受控准备与迁移
 
-在[受控安装](CONTROLLED-INSTALL.md)协议内使用 `policy-prepare` 替代 `prepare`，可以在数据库 admission 关闭期间编辑候选。它只监听 `127.0.0.1`，默认端口 8765，可用 `--policy-port` 指定非特权端口；不启动普通 API lifespan、scheduler、AI 恢复、过期任务或业务路由。
+首次安装及升级通过[受控安装](CONTROLLED-INSTALL.md)的 `prepare` 在目标业务库建立通用目录，数据库 admission 关闭期间，管理员继续从原后台角色操作区编辑候选。控制器只监听 `127.0.0.1`，默认端口 9527。原有代理可按管理协议转发同一后台地址。普通 API、scheduler、AI 恢复及过期任务均保持停写。脚本兼容入口 `policy-prepare` 支持无浏览器的维护协议。
 
 | 路径 | 行为 |
 | --- | --- |

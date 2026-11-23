@@ -15,7 +15,11 @@ from app.core.security import create_access_token
 from tests.scripts.test_authorization_maintenance_database import (
     deployment_database as deployment_database,
 )
-from tests.scripts.test_controlled_install_database import assert_closed, options
+from tests.scripts.test_controlled_install_database import (
+    assert_closed,
+    initialize_governed_old_schema,
+    options,
+)
 from tools.ops import controlled_install as install
 from tools.ops import policy_prepare
 
@@ -40,19 +44,10 @@ async def test_live_preparation_keeps_normal_admission_closed(
     args = options(tmp_path, role, monkeypatch, admin, bootstrap=True)
     # A direct upgrade starts from a real seeded installation, with its stop inventory.
     if not bootstrap:
-        async with install.ops.PostgresStop(
-            admin,
-            tmp_path / "initial",
-            install.ops.StopManifest(
-                "initial", "a" * 40, "direct", ("api", "scheduler")
-            ),
-            (role,),
-        ) as guard:
-            await install.prepare(guard, None, True)
-            await asyncio.sleep(31)
-            await guard.resume_bootstrap()
+        await initialize_governed_old_schema(writer)
         args = options(tmp_path, role, monkeypatch, admin, bootstrap=False)
-    args.command, args.policy_port = "policy-prepare", port
+    # The documented installer must enter the real management flow on both paths.
+    args.policy_port = port
     original = policy_prepare.serve
     validated_surfaces = []
     original_ingress = policy_prepare.validate_preparation_ingress
@@ -86,7 +81,7 @@ async def test_live_preparation_keeps_normal_admission_closed(
         policy_prepare.PolicyPreparation, "_execute_locked", observed_execute
     )
 
-    async def exercise(guard, processes, *, bootstrap, port):
+    async def exercise(guard, processes, *, bootstrap, port, assets, console_origin):
         async with guard.runtime_engine.connect() as db:
             actor = (
                 await db.execute(
@@ -277,13 +272,20 @@ async def test_live_preparation_keeps_normal_admission_closed(
 
         async with asyncio.timeout(60):
             server = asyncio.create_task(
-                original(guard, processes, bootstrap=bootstrap, port=port)
+                original(
+                    guard,
+                    processes,
+                    bootstrap=bootstrap,
+                    port=port,
+                    assets=assets,
+                    console_origin=console_origin,
+                )
             )
             client = asyncio.create_task(requests())
             try:
                 await client
                 result = await server
-                assert validated_surfaces == [17]
+                assert validated_surfaces == [19]
             finally:
                 for task in (client, server):
                     if not task.done():

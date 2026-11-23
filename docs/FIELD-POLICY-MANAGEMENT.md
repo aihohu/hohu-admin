@@ -64,25 +64,25 @@ ready/activate 使用闭集请求：`requestId`、`reason`、`expectedVersion`�
 
 ```bash
 pnpm install --frozen-lockfile
-pnpm build:policy --outDir /protected/policy-web
+pnpm build --outDir /protected/web-dist
 ```
 
-构建产生独立 `policy-prepare.html` 与 `policy-preparation.json`，后者包含协议、组件版本、源提交和构建文件SHA256。部署交接必须使用干净、已验收的源码提交及固定依赖，不能将有本地修改的构建声明为该提交的发布产物。运行时显式选择目录和完整 Web SHA：
+普通构建提供 `index.html` 与 `policy-preparation.json`。清单包含协议、组件版本、源码提交及构建文件 SHA256。交接时从干净的已验收源码及固定依赖构建，记录完整 Web SHA。
 
 ```bash
-python -m tools.ops.controlled_install policy-prepare \
+python -m tools.ops.controlled_install prepare \
   --inventory /protected/upgrade.json --control-dir /protected/control \
-  --policy-web-directory /protected/policy-web \
-  --policy-web-commit <40-character-web-sha> --policy-port 8765
+  --policy-web-directory /protected/web-dist \
+  --policy-web-commit <40-character-web-sha> --policy-port 9527
 ```
 
 新装另加 `--bootstrap`，其余配置遵循[受控安装](CONTROLLED-INSTALL.md)。目录和commit参数必须同时提供。控制器验证协议、0.2.0版本、源码SHA和每个文件摘要，只服务已验证的内存字节；未登记路径404，无普通业务路由fallback。清单≤256KiB、文件≤8MiB、合计≤64MiB，不提供任意文件读取。
 
-打开本机 `http://127.0.0.1:8765/`，输入租户代码、已有用户名和密码。升级前必须在每个已初始化或启用租户通过现有菜单/角色管理显式配置上述三个专用码，绑定给一个启用的 `R_SUPER` 管理身份；旧用户字段权限码不能代替。可先创建对应权限按钮再授权，升级种子按权限码复用，禁止直接改SQL授权。非新装在停写成立后、DDL前预检；新装在种子后预检。失败返回 `FIELD_POLICY_ADMIN_PREFLIGHT_REQUIRED`，不创建通用策略head或准备标记，且保持admission关闭，按维护恢复协议处理。
+保留管理员原有的后台地址。直接启动时将原 Web 端口交给控制器；部署已有 HTTPS 代理时使用 `--console-origin https://admin.example.org` 固定原地址，代理将整个后台临时指向控制器并保留准确的 Host。管理员在原登录页输入租户代码及已有账号，进入“系统管理 → 角色管理 → 字段权限”。恢复后将相同地址交回普通 Web/API。升级前必须在每个已初始化或启用租户通过现有菜单/角色管理显式配置上述三个专用码，绑定给一个启用的 `R_SUPER` 管理身份；旧用户字段权限码不能代替。可先创建对应权限按钮再授权，升级种子按权限码复用，禁止直接改SQL授权。非新装在停写成立后、DDL前预检；新装在种子后预检。失败返回 `FIELD_POLICY_ADMIN_PREFLIGHT_REQUIRED`，不创建通用策略head或准备标记，且保持admission关闭，按维护恢复协议处理。
 
-`POST /policy-prepare/login` 接受 `tenantCode`、`userName`、`password`，返回15分钟随机会话及tenant/actor字符串ID。密码校验在SQL事务和G/B锁之外；校验后重新检查当前身份和专用读取权限。不签发普通access/refresh token，服务端只存token摘要，客户端仅内存持有，不放URL/localStorage/sessionStorage。登录体≤8KiB，10次/分钟、最多16会话；同源与loopback Host校验阻断跨站请求和域名重绑定。登录沿用部署已有的租户登录模式及运行资格限制。
+`POST /policy-prepare/login` 接受 `tenantCode`、`userName`、`password`，返回15分钟随机会话及tenant/actor字符串ID。密码校验在SQL事务和G/B锁之外；校验后重新检查当前身份和专用读取权限。不签发普通access/refresh token，服务端只存token摘要，客户端仅内存持有，不放URL/localStorage/sessionStorage。登录体≤8KiB，10次/分钟、最多16会话；精确同源与已配置的 Host 校验阻断跨站请求和域名重绑定。登录沿用部署已有的租户登录模式及运行资格限制。
 
-`POST /policy-prepare/logout` 撤销会话；`POST /policy-prepare/finish` 在当前授权与停写核验后结束服务。证据失效、未决事务或致命错误销毁会话并禁止排队请求重新进入。旧 catalog/command 入口仍只使用已有管理JWT；该JWT不能调用新准备管理API。准备页面共用产品角色抽屉，其他菜单/角色业务操作保持禁用。
+`POST /policy-prepare/logout` 撤销会话；`POST /policy-prepare/finish` 在当前授权与停写核验后结束服务。证据失效、未决事务或致命错误销毁会话并禁止排队请求重新进入。旧 catalog/command 入口仍只使用已有管理JWT；该JWT不能调用新准备管理API。维护和正常运行均使用角色列表的同一个字段权限抽屉，其他菜单/角色业务操作保持禁用。
 
 准备控制器把最小登录/拒绝/结束事件写入受保护控制目录的 `policy-events.jsonl`，仅含时间、固定操作、稳定代码与已验证身份；单条≤1KiB、总≤8MiB，落盘失败会关闭会话。密码、令牌、草稿、原因和原异常文本不写入事件。候选成功的审计与回执仍在数据库事务内原子提交；普通API操作日志也不读取或记录管理请求体。
 

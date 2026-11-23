@@ -64,8 +64,8 @@ def installation(tmp_path, monkeypatch):
         database_oid=123,
         manifest=SimpleNamespace(build_sha="a" * 40, digest="b" * 64),
         runtime_engine=object(),
-        prepare_bootstrap=lambda: event("fence"),
-        prepare=lambda _processes: event("fence"),
+        prepare_bootstrap=lambda **_: event("fence"),
+        prepare=lambda _processes, **_: event("fence"),
         require_quiescent=lambda: event("observe"),
         bootstrap_fence=lambda: event("permit"),
     )
@@ -89,6 +89,14 @@ def installation(tmp_path, monkeypatch):
         return await seed()
 
     monkeypatch.setattr(install.ops, "execute_action", AsyncMock(side_effect=execute))
+    monkeypatch.setattr(
+        "tools.ops.policy_preparation_identity.require_preparation_administrators",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "tools.ops.policy_prepare.serve",
+        AsyncMock(side_effect=lambda *_a, **_k: events.append("policy")),
+    )
     monkeypatch.setenv("AUTHORIZATION_MAINTENANCE_PASSWORD", "unit-seed-password")
     return guard, processes, events
 
@@ -100,7 +108,12 @@ async def test_prepare_keeps_admission_closed_and_records_success(
     guard, processes, events = installation
     result = await install.prepare(guard, None if bootstrap else processes, bootstrap)
     assert result["state"] == "prepared-admission-closed"
-    assert events.index("fence") < events.index("migrate") < events.index("seed")
+    assert (
+        events.index("fence")
+        < events.index("migrate")
+        < events.index("seed")
+        < events.index("policy")
+    )
     if not bootstrap:
         assert events.index("stop") < events.index("migrate")
     assert (guard.directory / "stop.json").exists()

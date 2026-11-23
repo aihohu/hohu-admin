@@ -24,6 +24,7 @@ from app.core.authorization_maintenance import (
     acquire_maintenance_fence,
 )
 from app.core.exceptions import BusinessException
+from app.core.field_policy.console_origin import console_authority
 from app.core.field_policy.documents import catalog_parts, read_json
 from app.core.field_policy.maintenance import (
     require_normal_resume,  # noqa: F401 - shared protocol export
@@ -342,7 +343,8 @@ async def _ingress_lifespan(app):
     yield
 
 
-def create_app(controller, assets=None):
+def create_app(controller, assets=None, *, console_origin=None):
+    authority = console_authority(console_origin) if console_origin else None
     app = FastAPI(
         docs_url=None, redoc_url=None, openapi_url=None, lifespan=_ingress_lifespan
     )
@@ -370,12 +372,23 @@ def create_app(controller, assets=None):
 
     @app.middleware("http")
     async def local_origin(request, call_next):
-        # Exact loopback Host and same Origin prevent DNS rebinding/cross-site preparation.
-        if request.url.hostname not in {"127.0.0.1", "localhost"} or (
-            request.headers.get("origin") is not None
-            and request.headers["origin"]
-            != f"{request.url.scheme}://{request.headers.get('host')}"
+        # The trusted proxy preserves the original Host. Ignore all forwarding headers.
+        if (
+            len(request.headers.getlist("host")) != 1
+            or len(request.headers.getlist("origin")) > 1
         ):
+            return JSONResponse(
+                status_code=403,
+                content={"code": 403, "msg": "请求来源无效", "data": None},
+            )
+        host = request.headers.get("host")
+        if authority is None:
+            trusted_host = request.url.hostname in {"127.0.0.1", "localhost"}
+            origin = f"{request.url.scheme}://{host}"
+        else:
+            trusted_host = host == authority
+            origin = console_origin
+        if not trusted_host or request.headers.get("origin", origin) != origin:
             return JSONResponse(
                 status_code=403,
                 content={"code": 403, "msg": "请求来源无效", "data": None},
@@ -439,18 +452,13 @@ def create_app(controller, assets=None):
     return app
 
 
-async def serve(
-    guard, processes, *, bootstrap, port, web_directory=None, web_commit=None
-):
+async def serve(guard, processes, *, bootstrap, port, assets=None, console_origin=None):
     if type(port) is not int or not 1024 <= port <= 65535:
         raise ValueError("Policy preparation requires an unprivileged loopback port")
-    from tools.ops.policy_preparation_assets import PreparationAssets  # noqa: PLC0415
-
-    if bool(web_directory) != bool(web_commit):
-        raise ValueError(
-            "Preparation Web directory and exact commit are required together"
-        )
-    assets = PreparationAssets(web_directory, web_commit) if web_directory else None
+    if console_origin:
+        console_authority(console_origin)
+        if assets is None:
+            raise ValueError("A bound console origin requires verified Web assets")
     catalog = production_catalog()
     sessions = async_sessionmaker(guard.runtime_engine, expire_on_commit=False)
     await _evidence(guard, processes, bootstrap)
@@ -475,6 +483,8 @@ async def serve(
         "web_commit": assets.source_commit if assets else None,
         "web_manifest_digest": assets.digest if assets else None,
     }
+    if console_origin:
+        record.update(schema_version=4, console_origin=console_origin)
     _record(guard, record, create=True)
 
     async def observer():
@@ -503,7 +513,7 @@ async def serve(
     controller = PolicyPreparation(guard, processes, bootstrap, catalog)
     server = uvicorn.Server(
         uvicorn.Config(
-            create_app(controller, assets),
+            create_app(controller, assets, console_origin=console_origin),
             host="127.0.0.1",
             port=port,
             access_log=False,
@@ -511,6 +521,7 @@ async def serve(
             lifespan="on",
             limit_concurrency=16,
             timeout_keep_alive=2,
+            proxy_headers=False,
         )
     )
 
