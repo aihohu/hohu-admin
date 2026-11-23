@@ -22,10 +22,12 @@ from app.modules.system.field_policy.evaluator import FieldGrant
 from app.modules.system.field_policy.query_plan import query_denied
 from app.modules.system.field_policy.relation_catalog import (
     CONTAINS,
+    CREATE,
     EQ,
     EXACT,
     JOIN,
     READ,
+    UPDATE,
 )
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
@@ -38,6 +40,7 @@ from app.modules.system.service.relation_read_context import load_relation_read_
 from app.modules.system.service.settings_service import settings_service
 
 OWN = Access("read", "own-account")
+REPLACE = Access("replace", "management.relations")
 
 
 @read_phase("source")
@@ -174,7 +177,7 @@ def field_access(context, record):
         "departments",
     ):
         decision = reads[name]
-        caps = {
+        result[name] = {
             "read": decision.level,
             "maskId": decision.mask_id,
             "create": False,
@@ -182,25 +185,18 @@ def field_access(context, record):
             "replace": False,
             "queryOps": [],
         }
-        for op, action, access in (
-            ("create", "user.create", Access("create", "management.create")),
-            ("update", "user.update", Access("update", "management.update")),
-            (
-                "replace",
-                "user.roles" if name == "roles" else "user.departments",
-                Access("replace", "management.relations"),
-            ),
-        ):
-            if name not in {"roles", "departments"} and op == "replace":
-                continue
-            if (
-                set(context.catalog.actions[action].permission_codes)
-                <= context.permissions
-            ):
-                caps[op] = resolve_fields(
-                    context.catalog, context.rules, record, action, access
-                )[name].allowed
-        result[name] = caps
+    for op, action, access, names in (
+        ("create", "user.create", CREATE, result),
+        ("update", "user.update", UPDATE, result),
+        ("replace", "user.roles", REPLACE, ("roles",)),
+        ("replace", "user.departments", REPLACE, ("departments",)),
+    ):
+        if set(context.catalog.actions[action].permission_codes) <= context.permissions:
+            decisions = resolve_fields(
+                context.catalog, context.rules, record, action, access
+            )
+            for name in names:
+                result[name][op] = decisions[name].allowed
     return result
 
 

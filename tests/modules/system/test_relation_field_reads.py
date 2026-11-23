@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from sqlalchemy import delete, insert, select, update
 
 from app.core.exceptions import BusinessException
-from app.core.field_policy import FieldRef, Grant, RecordContext, compile_rules
+from app.core.field_policy import Access, FieldRef, Grant, RecordContext, compile_rules
 from app.db.authorization_plan_session import _known_read
 from app.db.authorization_runtime import AuthorizationRuntime
 from app.db.base import role_depts, role_menus, user_depts, user_roles
@@ -28,6 +28,7 @@ from app.modules.system.schemas.relation_projection import (
 )
 from app.modules.system.schemas.user import UserPatch
 from app.modules.system.schemas.user_projection import ProjectedUserOut
+from app.modules.system.service import relation_user_read
 from app.modules.system.service.relation_read_context import RelationReadContext
 from app.modules.system.service.relation_read_service import local_tree
 from tests.modules.system.test_authorization_system_candidate import TENANT, epoch
@@ -56,6 +57,33 @@ def test_relation_arrays_allow_aligned_hidden_slots():
 def test_selector_actions_keep_their_own_function_gate():
     action = relation_catalog().actions["role.assignable-read"]
     assert action.permission_codes == ("system:user:role-auth",)
+
+
+def test_user_capabilities_resolve_each_action_once_per_scoped_record(monkeypatch):
+    catalog = relation_catalog()
+    context = source_context()
+    edit = Access("update", "management.update")
+    context.permissions = frozenset({"system:user:list", "system:user:edit"})
+    context.rules = compile_rules(
+        catalog, (Grant(0, "201", FieldRef("system.user", "nickname"), edit),)
+    )
+    original = relation_user_read.resolve_fields
+    calls = []
+
+    def count(catalog, rules, record, action, access):
+        calls.append((record.record_key, action))
+        return original(catalog, rules, record, action, access)
+
+    monkeypatch.setattr(relation_user_read, "resolve_fields", count)
+    for key, role in (("301", "201"), ("302", "202")):
+        record = RecordContext(
+            0, "system.user", key, frozenset({role}), context.permissions
+        )
+        caps = relation_user_read.field_access(context, record)
+        assert caps["nickname"]["update"] is (role == "201")
+        assert not caps["user_phone"]["update"]
+        assert not caps["roles"]["replace"]
+    assert calls == [("301", "user.update"), ("302", "user.update")]
 
 
 def source_context():
