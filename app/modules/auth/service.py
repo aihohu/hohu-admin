@@ -655,6 +655,9 @@ def build_menu_tree(menus: list[Menu], parent_id: int = None) -> list[UserRoute]
     current_level_menus.sort(key=lambda x: x.order or 0)
 
     for menu in current_level_menus:
+        # Permission-only groups from older installations have no navigable route.
+        if not menu.route_name or not menu.route_path:
+            continue
         children = build_menu_tree(menus, menu.menu_id)
         component = menu.component or ""
         is_layout_only_directory = (

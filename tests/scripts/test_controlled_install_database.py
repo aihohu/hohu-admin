@@ -100,9 +100,20 @@ async def initialize_governed_old_schema(writer):
                 tenant_id=0, user_id=actor.user_id, role_id=admin_role.role_id
             )
         )
+        # The 0.1.6 management API permits a non-routable parent for explicit buttons.
+        group = Menu(
+            tenant_id=0,
+            menu_name="Field permissions",
+            menu_type="M",
+            status="1",
+            hide_in_menu=True,
+        )
+        db.add(group)
+        await db.flush()
         for suffix in ("view", "edit", "activate"):
             menu = Menu(
                 tenant_id=0,
+                parent_id=group.menu_id,
                 menu_name=suffix,
                 menu_type="F",
                 status="1",
