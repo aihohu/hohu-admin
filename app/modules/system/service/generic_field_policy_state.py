@@ -2,14 +2,14 @@
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import Text, select, tuple_
 
 from app.core.authorization_plan import ResourceKey
 from app.core.authorization_plan import ResourceKind as K
 from app.core.config import settings
 from app.core.exceptions import BusinessException
 from app.core.field_policy.contracts import require
-from app.core.field_policy.documents import catalog_parts, digest, load_rules
+from app.core.field_policy.documents import catalog_parts, digest
 from app.core.field_policy.qualification import Qualification
 from app.modules.system.models.field_policy import FieldPolicyManifest as Manifest
 from app.modules.system.models.field_policy import FieldPolicyManifestItem as Item
@@ -17,6 +17,7 @@ from app.modules.system.models.field_policy import FieldPolicyRevision as Revisi
 from app.modules.system.models.user_field_policy import (
     UserFieldPolicyGlobalGuard as Guard,
 )
+from app.modules.system.service.verified_policy_documents import documents_for
 
 
 def _unavailable():
@@ -52,7 +53,7 @@ async def read_manifest(db, *, tenant_id, manifest_id, expected_digest, catalog)
         page = (
             (
                 await db.execute(
-                    select(i, r.c.rules)
+                    select(i, r.c.rules.cast(Text).label("rules_text"))
                     .join(
                         r,
                         (i.c.tenant_id == r.c.tenant_id)
@@ -75,18 +76,15 @@ async def read_manifest(db, *, tenant_id, manifest_id, expected_digest, catalog)
         if not page:
             break
         for item in page:
-            if (
-                item["catalog_digest"] != catalog.digest
-                or digest(item["rules"]) != item["rules_digest"]
-            ):
+            if item["catalog_digest"] != catalog.digest:
                 raise _unavailable()
             grants.extend(
-                load_rules(
-                    catalog,
-                    item["rules"],
-                    tenant_id=tenant_id,
-                    role_id=item["role_id"],
-                    object_id=item["object_id"],
+                documents_for(catalog).rules(
+                    tenant_id,
+                    item["role_id"],
+                    item["object_id"],
+                    item["rules_digest"],
+                    item["rules_text"],
                 )
             )
             items.append(

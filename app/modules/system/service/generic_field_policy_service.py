@@ -6,16 +6,15 @@ from datetime import UTC, datetime
 from uuid import UUID
 from weakref import WeakKeyDictionary
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import Text, select, tuple_
 
 from app.core.authorization_plan import LockPlan, NewResource, ResourceKey
 from app.core.authorization_plan import ResourceKind as K
 from app.core.exceptions import BusinessException
-from app.core.field_policy.contracts import canonical, identity, primitive, require
+from app.core.field_policy.contracts import canonical, identity, require
 from app.core.field_policy.documents import (
     catalog_parts,
     digest,
-    load_catalog,
     load_rules,
 )
 from app.core.id_generator import next_id
@@ -55,6 +54,7 @@ from app.modules.system.service.generic_field_policy_state import (
     read_manifest,
     transition,
 )
+from app.modules.system.service.verified_policy_documents import documents_for
 
 READY_FIELDS = {
     "ready_manifest_digest": None,
@@ -232,9 +232,11 @@ class GenericFieldPolicyService:
         row = (
             (
                 await db.execute(
-                    select(CatalogRow.__table__).where(
-                        CatalogRow.catalog_digest == catalog.digest
-                    )
+                    select(
+                        CatalogRow.canonical_document.cast(Text).label("document_text"),
+                        CatalogRow.action_catalog_digest,
+                        CatalogRow.adapter_digest,
+                    ).where(CatalogRow.catalog_digest == catalog.digest)
                 )
             )
             .mappings()
@@ -243,10 +245,8 @@ class GenericFieldPolicyService:
         if row is None:
             raise failure()
         try:
-            loaded = load_catalog(
-                row["canonical_document"], expected_digest=catalog.digest
-            )
-            if catalog_parts(loaded) != (
+            documents = documents_for(catalog)
+            if documents.catalog_parts(row["document_text"]) != (
                 row["action_catalog_digest"],
                 row["adapter_digest"],
             ):
@@ -267,12 +267,11 @@ class GenericFieldPolicyService:
         if {r["object_id"] for r in rows} != set(catalog.objects):
             raise failure()
         for item in rows:
-            obj = catalog.objects[item["object_id"]]
             if (
                 item["domain_kind"],
                 item["schema_digest"],
                 item["adapter_version"],
-            ) != (obj.domain_kind, digest(primitive(obj)), obj.scope_adapter):
+            ) != documents.objects[item["object_id"]]:
                 raise failure()
 
     async def _objects(self, db, tenant_id, catalog):
