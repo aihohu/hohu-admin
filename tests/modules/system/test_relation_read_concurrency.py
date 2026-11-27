@@ -18,6 +18,7 @@ from app.modules.system.schemas.user import UserQuery
 from app.modules.system.service.authorization_system_candidate import (
     system_authorization_candidate,
 )
+from tests.db.lock_observation import wait_for_blocker
 from tests.modules.system.test_authorization_system_candidate import TENANT
 from tests.modules.system.test_authorization_system_candidate import (
     system_sessions as system_sessions,
@@ -26,7 +27,6 @@ from tests.modules.system.test_authorization_transaction_barriers import (
     plan_sessions as plan_sessions,
 )
 from tests.modules.system.test_relation_field_writes import activate_relations
-from tests.modules.system.test_relation_source_concurrency import blocked_by
 
 
 @pytest.mark.parametrize("writer_first", [False, True])
@@ -39,11 +39,20 @@ async def test_relation_reader_and_revocation_use_real_barriers(
     entered, release = asyncio.Event(), asyncio.Event()
     pids = []
     connection_pids = {}
+    second = None
+    second_barrier = asyncio.Event()
 
-    def observed(connection, *_args):
-        connection_pids[asyncio.current_task()] = (
+    def observed(connection, _cursor, sql, *_args):
+        task = asyncio.current_task()
+        connection_pids[task] = (
             connection.connection.dbapi_connection.driver_connection.get_server_pid()
         )
+        if (
+            task is second
+            and "sys_user_field_policy_global_guard" in sql
+            and "FOR " in sql
+        ):
+            second_barrier.set()
 
     event.listen(plain.kw["bind"].sync_engine, "before_cursor_execute", observed)
     if writer_first:
@@ -84,14 +93,18 @@ async def test_relation_reader_and_revocation_use_real_barriers(
             tenant=TENANT, actor_user_version=1, operation="user.revoke", target_id=101
         )
 
-    first = asyncio.create_task(write() if writer_first else read())
-    second = None
+    first = None
     try:
-        await asyncio.wait_for(entered.wait(), 3)
-        second = asyncio.create_task(read() if writer_first else write())
-        assert await blocked_by(plain, pids[0])
-        assert not second.done()
-        release.set()
+        async with plain() as probe:
+            await probe.connection()
+            first = asyncio.create_task(write() if writer_first else read())
+            await asyncio.wait_for(entered.wait(), 3)
+            second = asyncio.create_task(read() if writer_first else write())
+            await asyncio.wait_for(second_barrier.wait(), 3)
+            await wait_for_blocker(
+                probe, holder=pids[0], waiter=connection_pids[second], pending=second
+            )
+            release.set()
         result = await asyncio.wait_for(first, 3)
         if writer_first:
             with pytest.raises(BusinessException) as error:
