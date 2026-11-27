@@ -1,27 +1,41 @@
+import asyncio
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_permissions
-from app.core.base_response import PageResult, ResponseModel
-from app.core.cache import cache_delete
+from app.core.base_response import ResponseModel
 from app.core.exceptions import BusinessRuleException
+from app.core.file_delivery import private_file_headers
 from app.core.tenant import TenantContext, TenantLocatorContext
+from app.db.authorization_http import (
+    control_write,
+    get_authorization_runtime,
+    release_request_reads,
+)
 from app.db.session import get_db
 from app.modules.auth.service import (
+    access_identity,
     get_current_tenant_context,
     get_public_tenant_context,
 )
 from app.modules.system.models.user import User
 from app.modules.system.schemas.config import (
-    ConfigCreate,
-    ConfigOut,
     ConfigQuery,
-    ConfigUpdate,
 )
-from app.modules.system.service.config_service import config_service
+from app.modules.system.schemas.parameter_form import (
+    ParameterConfigCreate,
+    ParameterConfigUpdate,
+    ParameterFormQuery,
+    ParameterPublicationWrite,
+    ParameterRevocationWrite,
+)
+from app.modules.system.schemas.parameter_projection import (
+    ParameterPage,
+    ProjectedConfigOut,
+)
 from app.modules.system.service.file_policy_service import file_policy_service
 
 router = APIRouter()
@@ -34,13 +48,16 @@ async def get_public_configs(
     tenant: TenantLocatorContext = Depends(get_public_tenant_context),
 ):
     """获取公开访问的配置项，用于登录页、移动端等场景"""
-    data = await config_service.get_public_configs(db, tenant=tenant)
+    await release_request_reads(db)
+    data = await get_authorization_runtime().parameter_read(
+        tenant=tenant, actor_user_version=None, operation="config.public"
+    )
     return ResponseModel.success(data=data)
 
 
 @router.get(
     "/list",
-    response_model=ResponseModel[PageResult[ConfigOut]],
+    response_model=ResponseModel[ParameterPage[ProjectedConfigOut]],
     summary="获取系统配置列表分页",
     dependencies=[Depends(require_permissions("system:config:list"))],
 )
@@ -51,8 +68,34 @@ async def get_list(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """获取系统配置分页列表"""
-    page_data = await config_service.get_list(db, query, tenant=tenant)
+    identity = access_identity(_current_user)
+    await release_request_reads(db)
+    page_data = await get_authorization_runtime().parameter_read(
+        tenant=tenant,
+        actor_user_version=identity.user_version,
+        operation="config.list",
+        query=query,
+    )
     return ResponseModel.success(data=page_data)
+
+
+@router.get("/form")
+async def get_form(
+    query: Annotated[ParameterFormQuery, Query()],
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
+):
+    identity = access_identity(actor)
+    await release_request_reads(db)
+    return ResponseModel.success(
+        data=await get_authorization_runtime().parameter_read(
+            tenant=tenant,
+            actor_user_version=identity.user_version,
+            operation="config.form",
+            query=query,
+        )
+    )
 
 
 @router.get(
@@ -67,11 +110,17 @@ async def export_configs(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """导出系统配置为 Excel 文件"""
-    buf = await config_service.export_configs(db, query, tenant=tenant)
+    identity = access_identity(_current_user)
+    await release_request_reads(db)
+    buf = await get_authorization_runtime().parameter_export(
+        tenant=tenant,
+        actor_user_version=identity.user_version,
+        query=query,
+    )
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=config_export.xlsx"},
+        headers=private_file_headers("config_export.xlsx"),
     )
 
 
@@ -88,16 +137,24 @@ async def import_configs(
 ):
     """从 Excel 文件导入系统配置"""
     policy = await file_policy_service.resolve(db, "import", tenant=tenant)
-    file_bytes = await file.read(policy.max_bytes + 1)
-    if len(file_bytes) > policy.max_bytes:
+    identity = access_identity(_current_user)
+    await release_request_reads(db)
+    maximum = min(policy.max_bytes, CONFIG_IMPORT_MAX_SIZE_BYTES)
+    async with asyncio.timeout(5):
+        file_bytes = await file.read(maximum + 1)
+    if len(file_bytes) > maximum:
         raise BusinessRuleException(
             "File exceeds the configured import limit",
             error_code="CONFIG_IMPORT_FILE_TOO_LARGE",
         )
     policy.validate_extension(file.filename or "")
-    result = await config_service.import_configs(db, file_bytes, tenant=tenant)
-    await db.commit()
-    await cache_delete(pattern=f"tenant:{tenant.tenant_id}:config:*")
+    outcome = await get_authorization_runtime().control(
+        tenant=identity.tenant,
+        actor_user_version=identity.user_version,
+        operation="config.import",
+        payload=file_bytes,
+    )
+    result = outcome["result"] if "cache_refresh" in outcome else outcome
     return ResponseModel.success(
         data=result,
         msg=f"导入成功 {result['success']} 条，跳过 {result['skipped']} 条",
@@ -110,15 +167,20 @@ async def import_configs(
     dependencies=[Depends(require_permissions("system:config:add"))],
 )
 async def add(
-    config_in: ConfigCreate,
+    config_in: ParameterConfigCreate,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """创建新的系统配置"""
-    await config_service.create(db, config_in, tenant=tenant)
-    await db.commit()
-    await cache_delete(pattern=f"tenant:{tenant.tenant_id}:config:*")
+    await control_write(
+        db,
+        _current_user,
+        operation="config.create",
+        payload=config_in.model_dump(exclude={"form_receipt"}),
+        tenant=tenant,
+        protocol_receipt=config_in.form_receipt,
+    )
     return ResponseModel.success(msg="系统配置创建成功")
 
 
@@ -129,16 +191,68 @@ async def add(
 )
 async def update(
     config_id: int,
-    config_in: ConfigUpdate,
+    config_in: ParameterConfigUpdate,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """更新系统配置信息"""
-    await config_service.update(db, config_id, config_in, tenant=tenant)
-    await db.commit()
-    await cache_delete(pattern=f"tenant:{tenant.tenant_id}:config:*")
+    await control_write(
+        db,
+        _current_user,
+        operation="config.update",
+        payload=config_in.model_dump(exclude={"form_receipt"}, exclude_unset=True),
+        target_id=config_id,
+        tenant=tenant,
+        protocol_receipt=config_in.form_receipt,
+    )
     return ResponseModel.success(msg="系统配置更新成功")
+
+
+@router.put(
+    "/{config_id}/publication",
+    dependencies=[Depends(require_permissions("system:config:publish"))],
+)
+async def publish(
+    config_id: int,
+    payload: ParameterPublicationWrite,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
+):
+    return ResponseModel.success(
+        data=await control_write(
+            db,
+            actor,
+            operation="config.publish",
+            payload=payload,
+            target_id=config_id,
+            tenant=tenant,
+        )
+    )
+
+
+@router.delete(
+    "/{config_id}/publication",
+    dependencies=[Depends(require_permissions("system:config:publish"))],
+)
+async def revoke_publication(
+    config_id: int,
+    payload: ParameterRevocationWrite,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
+):
+    return ResponseModel.success(
+        data=await control_write(
+            db,
+            actor,
+            operation="config.revoke",
+            payload=payload,
+            target_id=config_id,
+            tenant=tenant,
+        )
+    )
 
 
 @router.delete(
@@ -153,9 +267,9 @@ async def delete(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """删除指定系统配置"""
-    await config_service.delete(db, config_id, tenant=tenant)
-    await db.commit()
-    await cache_delete(pattern=f"tenant:{tenant.tenant_id}:config:*")
+    await control_write(
+        db, _current_user, operation="config.delete", target_id=config_id, tenant=tenant
+    )
     return ResponseModel.success(msg="系统配置删除成功")
 
 
@@ -172,7 +286,12 @@ async def batch_delete(
 ):
     """批量删除多个系统配置"""
     int_ids = [int(i) for i in ids]
-    count = await config_service.batch_delete(db, int_ids, tenant=tenant)
-    await db.commit()
-    await cache_delete(pattern=f"tenant:{tenant.tenant_id}:config:*")
+    outcome = await control_write(
+        db,
+        _current_user,
+        operation="config.batch_delete",
+        payload=int_ids,
+        tenant=tenant,
+    )
+    count = outcome["result"] if isinstance(outcome, dict) else outcome
     return ResponseModel.success(msg=f"成功删除 {count} 个系统配置")

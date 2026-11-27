@@ -1,0 +1,89 @@
+# 0.2 受控安装与 CLI 交接
+
+本文适用于 Backend/Web 0.2.0 候选。最终支持的来源、镜像、平台与 CLI 组合以正式产品 `release.json` 为准；版本元数据和源码测试不能替代最终产物验收。
+
+CLI 0.1.16 使用 `hohu deploy`，不读取产品清单，也不自动生成停写证明。其默认 migrator 在迁移后执行裸 `python -m scripts.init_db`；0.2 的初始化要求维护 inventory，因此不能直接使用这一默认步骤。保留已发布 CLI，通过以下宿主受控准备和显式启动交接安装。无需新增部署平台；直接启动与 Docker Compose 都使用现有维护控制器。
+
+CLI 使用独立 Python 虚拟环境，安装固定版本 `python -m pip install "hohu==0.1.16"`，再用 `hohu --version` 核验。记录发布包来源、哈希及该环境依赖；不要用本地 CLI main checkout 或未固定版本的安装结果代替已验收包。CLI 的 Python 最低版本为3.10，与下述 Backend 控制器环境分别管理。
+
+## 前置条件
+
+- 使用与目标 Backend 相同完整 SHA 的只读源码和锁定依赖，设置准确的 `RELEASE_BUILD_SHA`。控制器需要 Python >=3.12；Compose 控制器在宿主使用 Docker CLI，不在普通 API 容器内挂 Docker socket。
+- 管理员先建立目标数据库与一个独立、非 superuser 的应用角色，赋予该角色目标数据库及 `public` schema 的迁移权限。API/scheduler 使用这个应用角色；宿主 `AUTHORIZATION_MAINTENANCE_DATABASE_URL` 使用独立管理身份，连接同一目标数据库。不要把维护 URL、维护密码放进应用的共享 `.env`。
+- 新装准备空数据库，禁止先启动应用；设置受控的 `AUTHORIZATION_MAINTENANCE_PASSWORD` 作为初始管理员密码。升级接受 `d01010100101`、`e0204a000001`、`e020f1200001`、`e020f2a00001`、`e020f2b00001`、`e020f2c00001`、`e020f3a00001`、`e020f3b00001` 或当前 `e020ac100001`；其他起点先走单独验证的升级路径。此入口只支持单应用数据库角色。
+- 备份配套数据库、公开/私有文件、原密钥、配置和撤权事实。旧 API、scheduler、API 内 AI 恢复/过期任务、维护脚本及外部写者全部纳入清点；用户入口保持维护状态。
+- 控制目录由维护人员保护，直接启动实例与宿主控制器共享正确的运行登记目录。每次新操作保留之前证据，不能通过删除 `stop.json` 或失败回执来绕过恢复检查。
+
+维护 inventory 与 [授权维护协议](AUTHORIZATION-MAINTENANCE.md) 的入口共用。新装文件使用以下结构，替换实际部署名、完整 Backend SHA 和应用角色；字符串占位符不是有效资格。
+
+```json
+{
+  "manifest": {
+    "deployment_id": "my-deployment",
+    "build_sha": "<40-character-backend-sha>",
+    "mode": "compose",
+    "surfaces": ["api", "scheduler"]
+  },
+  "application_roles": ["hohu_app"],
+  "bootstrap": true
+}
+```
+
+升级文件删除 `bootstrap`，加入真实 `processes`。Compose 使用 `{"mode":"compose","project":"实际项目名","services":{"实际服务名":["64位实际容器ID"]}}`，必须列全该项目的应用写者，不能只登记一台 API。直接启动的 manifest.mode 为 `direct`，processes 为 `{"mode":"direct","identities":[{"pid":实际PID,"birth":"实际进程出生标识"}]}`；使用既有进程身份采集工具，不能手编 birth。普通 Ctrl+C 或 compose down 的退出状态不是可信证据。
+
+## 准备、恢复 admission 与启动
+
+以下命令由维护者在目标 Backend checkout 的锁定环境执行。文件路径属于本次受控部署，不使用其他项目的 inventory。
+
+```bash
+# 新装：空库检查、固定迁移、bootstrap seed；成功仍保持关闭
+python -m tools.ops.controlled_install prepare \
+  --bootstrap --inventory /protected/install.json --control-dir /protected/control \
+  --policy-web-directory /protected/web-dist --policy-web-commit <web-sha>
+
+# 升级/再次同步种子：使用实际旧进程 inventory，省略 --bootstrap
+python -m tools.ops.controlled_install prepare \
+  --inventory /protected/upgrade.json --control-dir /protected/control \
+  --policy-web-directory /protected/web-dist --policy-web-commit <web-sha>
+```
+
+两者是替代路径，不连续执行。控制器先持有数据库维护锁，预热两条连接并关闭新连接，停止旧进程、禁重启及观察数据库在途事务；迁移复用原连接，以应用角色运行。迁移失败不执行 seed。成功返回 `prepared-admission-closed`，生成独占的 `control/install.json` 回执，绑定 build、数据库、目标 revision、模式和停写记录摘要。数据库新连接仍被拒绝，程序不会启动 CLI、API 或 scheduler。
+
+确认迁移/seed回执和配套产物后，等待最后一个维护 permit 超过30秒，再显式恢复数据库 admission；bootstrap 模式必须与 prepare 一致：
+
+```bash
+python -m tools.ops.controlled_install resume \
+  --bootstrap --inventory /protected/install.json --control-dir /protected/control
+```
+
+升级使用原 upgrade.json 并省略 `--bootstrap`。回执缺失、篡改、build或模式不同、旧进程仍活跃、目标库存在连接或permit未过期均拒绝。成功仅恢复数据库 admission，不恢复用户流量、进程或重启策略。数据库 admission 的重新开放必须与旧实例/旧凭据的运维隔离配合，不能让旧版本重新进入。
+
+在独立项目执行 `hohu deploy init` 后，人工 Compose override 固定 db-migrator/API/scheduler 的同一 Backend digest、Web digest及已验收基础设施，设置实际平台与 `pull_policy: never`。不要把完整 digest 放进仍拼接 `:IMAGE_TAG` 的变量。发布前的候选优先 `linux/amd64`、PG15/Redis7；CLI 默认 PG18/Redis8.6 不属于同一验收组合。准备并核验全部镜像，记录 Compose 最终配置和实际镜像 ID；不要打印包含秘密的展开配置。
+
+仅在上述 prepare、resume 及镜像预检都成功后，从 CLI 项目目录启动：
+
+```bash
+hohu deploy --source official --no-migrate
+```
+
+这里的 `--no-migrate` 是在必需迁移与 seed 已完成后的交接，不是跳过它们。CLI 本身不校验回执，操作者必须保留关联证据；不能用这个选项绕过失败步骤。保持入口仅供验收；scheduler 使用同一 Backend 镜像的实际 `python -m app.scheduler_worker` 入口，API 内 AI 恢复/过期任务同样纳入维护清点。等待命令不能作为 scheduler 运行或停写证明。直接启动采用同样的 prepare/resume 协议，再用部署方原有启动方式运行配套进程。
+
+此路径实际迁移执行者是宿主控制器，不会再运行CLI模板的db-migrator容器。该服务配置仍固定到同一Backend引用以防误用，但不能将其声明为已运行的迁移镜像。最终产物验收还须核对宿主源码、迁移、种子与锁定依赖的来源，证明与目标Backend镜像对应，并分别记录控制器运行环境和应用镜像身份。
+
+## 失败与恢复
+
+首次安装及升级统一执行 `prepare`。提供配套普通 Web 构建目录及完整提交 SHA。直接启动时将原后台端口交给仅监听 loopback 的控制器，默认 9527。已有 HTTPS 反向代理时，在受控维护期间将同一后台主机的请求转发到该监听，保留原 Host，并用 `--console-origin` 显式固定浏览器原有的 HTTPS origin。使用原地址登录，进入系统管理 → 角色管理 → 字段权限。升级在 DDL 前核验每个已初始化或启用租户现有的专用管理身份，新装在种子后核验。见[身份交接](FIELD-POLICY-MANAGEMENT.md)。
+
+部署方在服务端提供当前 `FIELD_POLICY_QUALIFICATION_FILE`（schema 2，≤1MiB，有效期最长 24h，绑定精确 Backend 构建、目录、迁移及验收证据）。管理员在同一业务库按租户预览、保存、封存清单、标记就绪并显式激活。结束维护将核验完整租户集合和活动状态。控制器退出并核验数据库静止后形成 `qualified-stopped` 记录，安装回执 schema 2 绑定其原始字节。缺失有效资格时，恢复门禁保持关闭。
+
+恢复要求当前资格未过期/未变，准备进程确已退出，build、databaseOID、部署manifest、stop/install/准备记录字节绑定一致，再满足原数据库会话/prepared核验和等待窗口。两个维护入口均执行这些检查；stop中的 `policy_prepare_required: true` 不因删除准备文件而消失。失败保持停写，不能删除标记、替换旧回执或手造资格绕过。恢复只开放admission，进程和流量仍由部署方显式启动；首次全系统激活需要该完整流程的新验收证据。
+
+异常、取消、迁移/seed或回执写入失败均不自动恢复 admission，也不自动重试业务或启动服务。`stop.json` 表示维护尚未解除；失败时保持入口隔离，先核对已提交的迁移/seed事实及备份。已迁移但seed未知不能重新当作空库bootstrap；通过现有维护修复协议处理，不能删记录或`stamp head`伪装成功。成功回执只记录这一阶段，不是正式发布资格或镜像正确性的证明。
+
+激活前恢复要求原版本、数据库、文件与密钥配套。激活后不得回接0.1.6后端或直接开放旧备份，须证明撤权/字段策略连续性和故障后的副作用，再向前恢复；详见[数据库迁移与恢复](DATABASE-MIGRATIONS.md)。最终产品仍需实际镜像组合的新装、升级、恢复、旧客户端拒绝与AI写一致性验收。
+
+### 普通对象目录扩展
+
+受控准备使用当前完整的23对象目录。受支持的历史目录仅在全部租户尚未激活时、完整停写围栏内扩展：保留原修订/manifest历史，当前绑定复制为新目录修订，递增绑定/head/object版本与授权epoch，旧预览和候选清单失效。新增对象不自动授予任何字段。维护回执包含目录摘要、受影响租户与修订对应关系。重复准备同一当前目录会完整核验当前绑定、候选和活动封存清单、各对象摘要与用户兼容镜像，不推进版本、epoch 或改写历史。合法 enforcing 或 frozen 状态可以进入同目录准备修复，且可与新租户空的 preparing 状态并存；过期 ready 不自动刷新，finish 仍拒绝活跃租户的冻结或未完成状态。已经激活的历史目录不接受目录扩展路径，须另行验证升级方案。
+
+`e020f2a00001` 为字典关联外键增加更新级联，并建立每租户每类型唯一默认项索引。若历史数据存在多个默认项，升级会中止；须先按已授权的数据修复流程处理冲突，再重跑。安装不会自动修改业务默认项，也不会因 DDL 或候选准备成功而恢复服务。

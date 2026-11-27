@@ -18,7 +18,9 @@ class DictTypeBase(BaseModel):
     )
     remark: str | None = Field(None, max_length=500, description="备注")
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid"
+    )
 
     @field_validator("dict_name")
     @classmethod
@@ -55,7 +57,9 @@ class DictTypeUpdate(BaseModel):
     status: str | None = Field(None, description="状态：1-启用，2-禁用")
     remark: str | None = Field(None, max_length=500, description="备注")
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid"
+    )
 
     @field_validator("dict_name")
     @classmethod
@@ -128,4 +132,6 @@ class DictTypeQuery(BaseModel):
             raise ValueError("状态必须是 1(启用) 或 2(禁用)")
         return v
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid"
+    )

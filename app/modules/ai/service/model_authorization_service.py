@@ -15,6 +15,7 @@ from app.modules.ai.core.provider_registry import create_model
 from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.model_policy import TenantAiModelPolicy
 from app.modules.ai.models.provider import AiProvider
+from app.modules.ai.schemas.control_config import validate_control_config
 from app.modules.ai.schemas.model import ModelOption
 
 
@@ -138,6 +139,8 @@ class ModelAuthorizationService:
     def create_model_instance(self, selected: AuthorizedChatModel):
         model = selected.model
         provider = selected.provider
+        validate_control_config(provider.config, kind="provider")
+        validate_control_config(model.config, kind="model")
         return create_model(
             provider.provider_code,
             model.name,

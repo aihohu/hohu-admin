@@ -2,6 +2,7 @@ import hashlib
 import logging
 import re
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import Depends, Request
@@ -21,6 +22,7 @@ from app.constants import (
     REDIS_BLACKLIST_TTL,
     STATUS_ENABLED,
 )
+from app.core.authorization_plan import ResourceKey, ResourceKind
 from app.core.base_response import ResponseModel
 from app.core.config import settings
 from app.core.exceptions import (
@@ -58,7 +60,6 @@ from app.modules.platform.audit import (
 )
 from app.modules.platform.auth import authenticate_platform_token
 from app.modules.platform.constants import platform_permission_for_request
-from app.modules.system.models.login_log import SysLoginLog
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.tenant import Tenant
@@ -249,19 +250,20 @@ class AuthService:
     ):
         """写入登录日志（使用独立 session，不受主事务回滚影响）"""
         try:
-            async with AsyncSessionLocal() as session:
-                log = SysLoginLog(
-                    tenant_id=tenant_id,
-                    audit_scope=audit_scope,
-                    user_id=user_id,
-                    username=username,
-                    ip=ip,
-                    user_agent=user_agent,
-                    status=status,
-                    message=message,
-                )
-                session.add(log)
-                await session.commit()
+            from app.db.authorization_http import (  # noqa: PLC0415
+                get_authorization_runtime,
+            )
+
+            await get_authorization_runtime().http_audit.login(
+                tenant_id=tenant_id,
+                audit_scope=audit_scope,
+                user_id=user_id,
+                username=username,
+                ip=ip,
+                user_agent=user_agent,
+                status=status,
+                message=message,
+            )
         except Exception:
             logger.exception("Failed to write login log")
 
@@ -441,6 +443,29 @@ async def refresh_access_token(refresh_token: str) -> tuple[str, str]:
 
 async def load_live_user_authority(db: AsyncSession, *, tenant: TenantContext) -> User:
     """Reload authorization facts at a long-running operation's commit boundary."""
+    user = await _load_user_authority(db, tenant=tenant)
+    bind_tenant_context(user, tenant)
+    return user
+
+
+async def load_background_projection_authority(db, *, tenant, tx):
+    """A locked current projection identity is never a verified JWT identity."""
+    tx.assert_session(db)
+    tx.assert_held(
+        ResourceKey(ResourceKind.TENANT, None, tenant.tenant_id),
+        ResourceKey(ResourceKind.USER, tenant.tenant_id, tenant.actor_user_id),
+    )
+    if type(tenant) is not TenantContext or tenant.source != "platform_control":
+        raise AuthenticationException(
+            "后台展示身份无效", error_code="TENANT_CONTEXT_INVALID"
+        )
+    user = await _load_user_authority(db, tenant=tenant)
+    user.__dict__.pop("_verified_access_identity", None)
+    user._tenant_context = tenant
+    return user
+
+
+async def _load_user_authority(db: AsyncSession, *, tenant: TenantContext) -> User:
     user = await db.scalar(
         select(User)
         .where(User.user_id == tenant.actor_user_id, User.tenant_id == tenant.tenant_id)
@@ -462,16 +487,37 @@ async def load_live_user_authority(db: AsyncSession, *, tenant: TenantContext) -
         raise AuthorizationException(
             "当前账号或租户已不可用", error_code="AI_TOOL_PERM_DENIED"
         )
-    bind_tenant_context(user, tenant)
     return user
 
 
-async def get_current_user(
-    token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)
-) -> User:
-    """
-    JWT Token 验证依赖项
-    """
+@dataclass(frozen=True, slots=True)
+class AccessIdentity:
+    tenant: TenantContext
+    user_version: int
+
+
+def access_identity(user: User) -> AccessIdentity:
+    """Retain the signed uver; mutable ORM refreshes cannot upgrade a request."""
+    identity = user.__dict__.get("_verified_access_identity")
+    if (
+        type(identity) is not AccessIdentity
+        or identity.tenant != get_bound_tenant_context(user)
+        or identity.tenant.actor_user_id != user.user_id
+        or identity.tenant.tenant_id != user.tenant_id
+    ):
+        raise AuthenticationException(error_code="TOKEN_EXPIRED")
+    return identity
+
+
+@dataclass(frozen=True, slots=True)
+class AccessClaims:
+    user_id: int
+    tenant_id: int
+    tenant_version: int
+    user_version: int
+
+
+async def get_access_claims(token: str = Depends(oauth2_scheme)) -> AccessClaims:
     try:
         # 0. 解码 Token，并在任何 Redis/DB 访问前应用 hosted runtime gate。
         payload = decode_access_token(token)
@@ -491,7 +537,16 @@ async def get_current_user(
             "Token 已失效，请重新登录", error_code="TOKEN_EXPIRED"
         )
 
-    # 2. 查询用户并预加载角色和菜单 (RBAC 核心)
+    return AccessClaims(user_id, tenant_id, tenant_version, user_version)
+
+
+async def get_current_user(
+    token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)
+) -> User:
+    claims = await get_access_claims(token)
+    user_id, tenant_id = claims.user_id, claims.tenant_id
+    tenant_version, user_version = claims.tenant_version, claims.user_version
+    # 查询用户并预加载角色和菜单 (RBAC 核心)
     # 使用 selectinload 解决异步环境下的关联查询
     result = await db.execute(
         select(User)
@@ -528,7 +583,9 @@ async def get_current_user(
             source="access_token",
         ),
     )
-
+    user.__dict__["_verified_access_identity"] = AccessIdentity(
+        get_bound_tenant_context(user), user_version
+    )
     return user
 
 
@@ -610,6 +667,9 @@ def build_menu_tree(menus: list[Menu], parent_id: int = None) -> list[UserRoute]
     current_level_menus.sort(key=lambda x: x.order or 0)
 
     for menu in current_level_menus:
+        # Permission-only groups from older installations have no navigable route.
+        if not menu.route_name or not menu.route_path:
+            continue
         children = build_menu_tree(menus, menu.menu_id)
         component = menu.component or ""
         is_layout_only_directory = (

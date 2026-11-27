@@ -51,7 +51,7 @@ async def paginate(
         query = query.where(and_(*filters))
 
     # 查询总数
-    count_stmt = select(func.count()).select_from(model)
+    count_stmt = select(func.pg_catalog.count(1)).select_from(model)
     if filters:
         count_stmt = count_stmt.where(and_(*filters))
     total = (await db.execute(count_stmt)).scalar() or 0
@@ -114,7 +114,7 @@ async def paginate_custom(
         try:
             # 创建子查询别名进行计数
             subquery = query.alias("subquery")
-            count_query = select(func.count()).select_from(subquery)
+            count_query = select(func.pg_catalog.count(1)).select_from(subquery)
             total = (await db.execute(count_query)).scalar() or 0
         except Exception:
             # 如果自动推断失败，默认返回 0

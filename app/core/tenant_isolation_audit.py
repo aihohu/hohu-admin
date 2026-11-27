@@ -44,7 +44,57 @@ _NAMESPACE_REGISTRY: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "core/redis.py": ("cache", "infrastructure", ()),
     "core/scheduler.py": ("cache", "infrastructure", ()),
     "core/tenant_scope.py": ("cache", "tenant", ("tenant_id",)),
-    "middleware/audit_middleware.py": ("cache", "tenant", ("tenant_id",)),
+    "db/authorization_system_owner.py": (
+        "cache",
+        "tenant",
+        ("tenant_cache_key",),
+    ),
+    "db/authorization_ai_owner.py": ("cache", "tenant", ("tenant_id",)),
+    "db/authorization_control_owner.py": (
+        "cache",
+        "tenant",
+        ("cache_keys", "configuration_authorization_candidate", "tenant"),
+    ),
+    "db/authorization_lifecycle_owner.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "ArtifactExecution"),
+    ),
+    "db/authorization_preview_owner.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "ArtifactExecution"),
+    ),
+    "db/authorization_transfer_cache.py": (
+        "cache",
+        "tenant",
+        ("tenant_id",),
+    ),
+    "db/authorization_transfer_owner.py": (
+        "cache",
+        "tenant",
+        ("tenant_id",),
+    ),
+    "db/authorization_transfer_http.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "ArtifactExecution"),
+    ),
+    "modules/system/service/authorization_upload_candidate.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "validate_private_storage_roots", "PublishedUpload"),
+    ),
+    "modules/system/service/authorization_chat_image_candidate.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "validate_private_storage_roots", "ChatImage"),
+    ),
+    "db/authorization_runtime.py": (
+        "storage",
+        "infrastructure",
+        ("AuthorizationPlanSession", "TransferOwner", "get_file_storage"),
+    ),
     "middleware/rate_limit_middleware.py": ("cache", "global", ()),
     "modules/system/api/settings.py": ("cache", "tenant", ("tenant_id",)),
     "modules/auth/service.py": ("cache", "global", ()),
@@ -62,14 +112,29 @@ _NAMESPACE_REGISTRY: dict[str, tuple[str, str, tuple[str, ...]]] = {
         "tenant",
         ("tenant_id",),
     ),
-    "modules/ai/agents/gateway/preview_execution.py": (
+    "modules/ai/agents/gateway/authorization_execution.py": (
         "storage",
         "tenant",
-        ("tenant_id",),
+        ("tenant_id", "ArtifactExecution"),
+    ),
+    "modules/ai/service/authorization_execution_candidate.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "ArtifactExecution"),
+    ),
+    "modules/ai/service/authorization_lifecycle_candidate.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "ArtifactExecution"),
     ),
     "modules/ai/core/context.py": ("storage", "tenant", ("tenant_id",)),
     "modules/ai/agents/gateway/executor.py": ("cache", "tenant", ("tenant",)),
     "modules/ai/agents/gateway/failures.py": ("cache", "tenant", ("tenant_id",)),
+    "core/auxiliary_budget.py": (
+        "cache",
+        "infrastructure",
+        ("RedisError",),
+    ),
     "modules/ai/agents/gateway/quota.py": ("cache", "tenant", ("tenant_id",)),
     "modules/ai/agents/hitl/manager.py": ("cache", "tenant", ("tenant_id",)),
     "modules/ai/agents/hitl/query_cache.py": ("cache", "tenant", ("tenant_id",)),
@@ -138,15 +203,25 @@ _NAMESPACE_REGISTRY: dict[str, tuple[str, str, tuple[str, ...]]] = {
         "tenant",
         ("tenant_id",),
     ),
-    "modules/system/api/config.py": (
-        "cache",
-        "tenant",
-        ("tenant_id",),
-    ),
     "modules/system/service/user_import_service.py": (
         "cache_storage",
         "tenant",
         ("tenant_id",),
+    ),
+    "modules/system/service/authorization_import_candidate.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "identity", "storage_key"),
+    ),
+    "modules/system/service/authorization_ai_file_adapter.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "ArtifactExecution"),
+    ),
+    "modules/system/service/authorization_transfer_candidate.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "ArtifactExecution"),
     ),
     "modules/system/service/transfer_cleanup_service.py": (
         "cache_storage",

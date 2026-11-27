@@ -21,22 +21,44 @@ def _scripts() -> ScriptDirectory:
 
 def test_history_preserves_release_boundary_and_current_head() -> None:
     scripts = _scripts()
-    assert scripts.get_heads() == ["d01010100101"]
+    assert scripts.get_heads() == ["e020ac100001"]
     assert scripts.get_bases() == ["bf244f9a8b76"]
     assert [
         (item.revision, item.down_revision) for item in scripts.walk_revisions()
     ] == [
+        ("e020ac100001", "e020f3b00001"),
+        ("e020f3b00001", "e020f3a00001"),
+        ("e020f3a00001", "e020f2c00001"),
+        ("e020f2c00001", "e020f2b00001"),
+        ("e020f2b00001", "e020f2a00001"),
+        ("e020f2a00001", "e020f1200001"),
+        ("e020f1200001", "e0204a000001"),
+        ("e0204a000001", "e0203c000001"),
+        ("e0203c000001", "e0203b000001"),
+        ("e0203b000001", "e0202a000001"),
+        ("e0202a000001", "d01010100101"),
         ("d01010100101", "bf244f9a8b76"),
         ("bf244f9a8b76", None),
     ]
     assert {path.name for path in (PROJECT_ROOT / "alembic/versions").glob("*.py")} == {
         "bf244f9a8b76_baseline.py",
         "d01010100101_squash_to_head.py",
+        "e0202a000001_user_field_policy_storage.py",
+        "e0203b000001_transfer_field_lineage.py",
+        "e0203c000001_ai_field_authority.py",
+        "e0204a000001_user_field_policy_activation.py",
+        "e020f1200001_generic_field_policy.py",
+        "e020f2a00001_ordinary_dictionary_integrity.py",
+        "e020f2b00001_department_leader_source.py",
+        "e020f2c00001_control_publication_dispatch.py",
+        "e020f3a00001_file_delivery_provenance.py",
+        "e020f3b00001_conversation_title_provenance.py",
+        "e020ac100001_user_list_policy.py",
     }
 
 
 def test_upgrade_preserves_original_step_order(monkeypatch) -> None:
-    module = _scripts().get_revision("head").module
+    module = _scripts().get_revision("d01010100101").module
     called = []
     for step in STEPS:
         monkeypatch.setattr(
@@ -47,7 +69,7 @@ def test_upgrade_preserves_original_step_order(monkeypatch) -> None:
 
 
 def test_downgrade_reverses_original_step_order(monkeypatch) -> None:
-    module = _scripts().get_revision("head").module
+    module = _scripts().get_revision("d01010100101").module
     called = []
     for step in STEPS:
         monkeypatch.setattr(

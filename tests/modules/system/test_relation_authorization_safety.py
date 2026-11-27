@@ -1,0 +1,203 @@
+"""Before/after checks preserve live repair paths and complete descendant boundaries."""
+
+from copy import deepcopy
+from types import SimpleNamespace
+
+import pytest
+
+from app.core.authorization_plan import ResourceKey
+from app.core.authorization_plan import ResourceKind as K
+from app.core.exceptions import BusinessException
+from app.modules.system.menu_seed import build_initial_menus
+from app.modules.system.service.relation_authorization_safety import (
+    REPAIR_CODES,
+    repair_accounts,
+    require_manager_preserved,
+    validate_menu_delegation,
+)
+from scripts.init_db import fresh_role_permission_menus
+
+
+def facts():
+    result = {k: [] for k in K}
+    result[K.ROLE] = [{"role_id": 201, "role_code": "R_SUPER", "status": "1"}]
+    result[K.USER] = [{"user_id": 101, "status": "1"}]
+    result[K.USER_ROLES] = [{"user_id": 101, "role_id": 201}]
+    result[K.MENU] = [
+        {
+            "menu_id": 501,
+            "parent_id": None,
+            "menu_type": "M",
+            "status": "1",
+            "component": "layout.base",
+            "route_name": "auth",
+            "route_path": "/auth",
+        },
+        {
+            "menu_id": 502,
+            "parent_id": 501,
+            "menu_type": "C",
+            "status": "1",
+            "route_name": "system_role",
+            "component": "view.system_role",
+            "route_path": "/system/role",
+        },
+        *(
+            {
+                "menu_id": i,
+                "parent_id": 502,
+                "menu_type": "F",
+                "status": "1",
+                "permission": p,
+            }
+            for i, p in enumerate(sorted(REPAIR_CODES), 503)
+        ),
+    ]
+    result[K.ROLE_MENUS] = [
+        {"role_id": 201, "menu_id": m["menu_id"]} for m in result[K.MENU]
+    ]
+    return result
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "user",
+        "role",
+        "membership",
+        "ancestor",
+        "component",
+        "button",
+        "hidden",
+        "cycle",
+        "unbound_button",
+        "ancestor_component",
+        "ancestor_path",
+        "ancestor_href",
+        "ancestor_route_name",
+    ],
+)
+def test_last_repair_path_cannot_be_lost(change):
+    before = facts()
+    after = deepcopy(before)
+    if change == "user":
+        after[K.USER][0]["status"] = "2"
+    if change == "role":
+        after[K.ROLE][0]["status"] = "2"
+    if change == "membership":
+        after[K.USER_ROLES].clear()
+    if change == "ancestor":
+        after[K.MENU][0]["status"] = "2"
+    if change == "component":
+        after[K.MENU][1]["component"] = "view.other"
+    if change == "button":
+        after[K.MENU][-1]["permission"] = "system:other:edit"
+    if change == "hidden":
+        after[K.MENU][1]["hide_in_menu"] = True
+    if change == "cycle":
+        after[K.MENU][0]["parent_id"] = 502
+    if change == "unbound_button":
+        after[K.ROLE_MENUS] = [r for r in after[K.ROLE_MENUS] if r["menu_id"] != 503]
+    if change == "ancestor_component":
+        after[K.MENU][0]["component"] = "view.other"
+    if change == "ancestor_path":
+        after[K.MENU][0]["route_path"] = None
+    if change == "ancestor_href":
+        after[K.MENU][0]["href"] = "https://example.invalid"
+    if change == "ancestor_route_name":
+        after[K.MENU][0]["route_name"] = None
+    with pytest.raises(BusinessException) as error:
+        require_manager_preserved(before, after)
+    assert (
+        error.value.error_code == "AUTHORIZATION_LAST_MANAGER_REQUIRED"
+        and error.value.code == 409
+    )
+
+
+def test_damaged_registered_navigation_requires_actual_repair():
+    damaged = facts()
+    damaged[K.MENU][1]["status"] = "2"
+    with pytest.raises(BusinessException):
+        require_manager_preserved(damaged, deepcopy(damaged))
+    require_manager_preserved(damaged, facts())
+
+
+def test_super_navigation_does_not_require_explicit_route_bindings():
+    before = facts()
+    # /getUserRoutes includes all enabled tenant M/C routes for R_SUPER;
+    # field management still requires its explicitly bound permission codes.
+    before[K.ROLE_MENUS] = [r for r in before[K.ROLE_MENUS] if r["menu_id"] >= 503]
+    assert repair_accounts(before) == {101}
+    require_manager_preserved(before, deepcopy(before))
+
+
+def test_button_status_does_not_revoke_explicit_function_permissions():
+    before = facts()
+    for menu in before[K.MENU][2:]:
+        menu["status"] = "2"
+    assert repair_accounts(before) == {101}
+    require_manager_preserved(before, deepcopy(before))
+
+
+def test_canonical_fresh_install_has_a_usable_repair_path():
+    before = facts()
+    menus = build_initial_menus(tenant_id=0)
+    before[K.MENU] = [
+        {key: value for key, value in vars(menu).items() if not key.startswith("_")}
+        for menu in menus
+    ]
+    before[K.ROLE_MENUS] = [
+        {"role_id": 201, "menu_id": m.menu_id}
+        for m in fresh_role_permission_menus(menus)
+    ]
+    assert repair_accounts(before) == {101}
+    require_manager_preserved(before, deepcopy(before))
+
+
+def test_another_enabled_repair_account_can_preserve_access():
+    before = facts()
+    before[K.ROLE].append({"role_id": 202, "role_code": "R_SUPER", "status": "1"})
+    before[K.USER].append({"user_id": 102, "status": "1"})
+    before[K.USER_ROLES].append({"user_id": 102, "role_id": 202})
+    before[K.ROLE_MENUS] += [
+        {"role_id": 202, "menu_id": m["menu_id"]} for m in before[K.MENU]
+    ]
+    after = deepcopy(before)
+    after[K.ROLE][0]["status"] = "2"
+    require_manager_preserved(before, after)
+
+
+@pytest.mark.parametrize(
+    "values", [{"parent_id": None}, {"status": "1"}, {"permission": "outside:grant"}]
+)
+def test_registration_uses_full_subtree_and_member_scope(values):
+    before = facts()
+    before[K.ROLE][0]["role_code"] = "R_STAFF"
+    actor = SimpleNamespace(
+        super_admin=False,
+        permission_codes=frozenset(REPAIR_CODES),
+        enabled_role_ids=frozenset({999}),
+        accessible_user_scope=frozenset({999}),
+        menu_ids=frozenset(m["menu_id"] for m in before[K.MENU]),
+    )
+    change = SimpleNamespace(
+        key=ResourceKey(K.MENU, 0, 501), action="update", values=values
+    )
+    with pytest.raises(BusinessException) as error:
+        validate_menu_delegation(before, before, [change], actor)
+    assert error.value.error_code == "AUTHORIZATION_DELEGATION_DENIED"
+
+
+def test_ordinary_icon_change_does_not_confer_registration():
+    before = facts()
+    actor = SimpleNamespace(
+        super_admin=False,
+        permission_codes=frozenset(),
+        enabled_role_ids=frozenset(),
+        accessible_user_scope=frozenset(),
+        menu_ids=frozenset(),
+    )
+    change = SimpleNamespace(
+        key=ResourceKey(K.MENU, 0, 501), action="update", values={"icon": "icon:new"}
+    )
+    validate_menu_delegation(before, before, [change], actor)

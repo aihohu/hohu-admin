@@ -7,7 +7,6 @@ from jose import jwt
 from pydantic import ValidationError
 from starlette.requests import Request
 
-from app.core.base_response import ResponseModel
 from app.core.config import Settings, settings
 from app.core.exceptions import AuthenticationException, AuthorizationException
 from app.core.security import (
@@ -348,11 +347,9 @@ async def test_docs_login_forwards_host_locator_to_authentication():
     )
     form = SimpleNamespace(username="alice", password="secret")
     db = AsyncMock()
-    authenticate = AsyncMock(
-        return_value=ResponseModel.success(data={"token": "access"})
-    )
+    authenticate = AsyncMock(return_value={"token": "access"})
 
-    with patch.object(auth_service, "authenticate", authenticate):
+    with patch("app.modules.auth.api.login_http", authenticate):
         response = await login_for_docs(request=request, form=form, db=db)
 
     assert response == {"access_token": "access", "token_type": "bearer"}

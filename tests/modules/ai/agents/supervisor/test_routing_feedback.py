@@ -122,9 +122,9 @@ async def test_feedback_soft_deleted_conversation_returns_404(
     """A message in a soft-deleted conversation is no longer writable."""
     from datetime import UTC, datetime
 
-    from app.db.session import AsyncSessionLocal
     from app.modules.ai.models.conversation import AiConversation
     from app.modules.ai.models.message import AiMessage
+    from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
     msg_id = seed_test_message
     async with AsyncSessionLocal() as session:

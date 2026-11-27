@@ -515,9 +515,9 @@ class UserRoleAssignmentService:
                             or_(
                                 Dept.dept_id.in_(all_own_dept_ids),
                                 *(
-                                    func.concat(",", Dept.ancestors, ",").like(
-                                        f"%,{dept_id},%"
-                                    )
+                                    func.pg_catalog.concat(
+                                        ",", Dept.ancestors, ","
+                                    ).like(f"%,{dept_id},%")
                                     for dept_id in sorted(all_own_dept_ids)
                                 ),
                             ),

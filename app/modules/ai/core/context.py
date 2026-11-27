@@ -114,6 +114,9 @@ class ChatDeps:
     source_user_message_id: int | None = None
     """本 run 已持久化的 source user message；operation/assistant 因果键。"""
 
+    authorize_model_context: Callable[[], Awaitable[None]] | None = None
+    """Server-owned short-transaction check before every provider request."""
+
     command_action: str = "send"
     """当前仅启用 send；为共享 finalizer/handoff 保留 action 语义。"""
 

@@ -214,7 +214,7 @@ class TestBuildChatDeps:
         assert deps.agent.is_builtin is True
 
 
-async def test_revoked_sticky_agent_is_cleared_and_rerouted(
+async def test_revoked_sticky_agent_is_rerouted_without_implicit_write(
     db_session: AsyncSession,
 ) -> None:
     """旧会话粘滞失权后不沿用，交回最新候选集路由。"""
@@ -250,7 +250,8 @@ async def test_revoked_sticky_agent_is_cleared_and_rerouted(
             conversation_id=conversation.conversation_id,
         )
 
-    assert conversation.agent_code is None
+    assert conversation.agent_code == "role_mgmt"
+    assert conversation not in db_session.dirty
     assert deps.agent is None
     assert deps.sticky_decision.run_supervisor is True
     assert deps.sticky_decision.reason == "auto_fallback_forbidden"

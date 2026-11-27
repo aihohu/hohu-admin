@@ -1,126 +1,151 @@
-from types import SimpleNamespace
+"""Runtime navigation and management existence keep the current tenant scope."""
 
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import insert, select, update
 
-from app.constants import SUPER_ADMIN_ROLE_CODE
-from app.core.id_generator import next_id
-from app.db.session import AsyncSessionLocal, engine
-from app.modules.auth.api import get_user_routes, is_route_exist
+from app.core.tenant import TenantContext
+from app.db.authorization_runtime import AuthorizationRuntime
+from app.db.base import Base, role_menus, user_roles
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
-from app.modules.system.models.tenant import Tenant
+from tests.modules.system.test_authorization_system_candidate import (
+    system_sessions as system_sessions,
+)
+from tests.modules.system.test_authorization_transaction_barriers import (
+    plan_sessions as plan_sessions,
+)
 
 
-@pytest.fixture
-async def db_session() -> AsyncSession:
-    async with engine.connect() as connection:
-        outer = await connection.begin()
-        try:
-            async with AsyncSessionLocal(bind=connection) as session:
-                yield session
-        finally:
-            await outer.rollback()
-    try:
-        await engine.dispose()
-    except RuntimeError as exc:
-        if "Event loop is closed" not in str(exc):
-            raise
+def route_names(routes):
+    return {
+        name
+        for route in routes
+        for name in ({route["name"]} | route_names(route.get("children", [])))
+    }
 
 
-def _route_names(routes: list) -> set[str]:
-    names: set[str] = set()
-    for route in routes:
-        names.add(route.name)
-        names.update(_route_names(route.children or []))
-    return names
-
-
-async def test_super_admin_routes_and_existence_are_tenant_scoped(db_session):
-    tenant_id = next_id()
-    tenant = Tenant(
-        tenant_id=tenant_id,
-        tenant_code=f"routes-{tenant_id}",
-        tenant_name="Routes Tenant",
-        status="2",
-        lifecycle_state="prepared",
-        bootstrap_version=0,
-    )
-    default_only = Menu(
-        tenant_id=0,
-        parent_id=None,
-        menu_name="Default only",
-        menu_type="C",
-        component="layout.base$view.home",
-        route_name=f"default_only_{tenant_id}",
-        route_path=f"/default-only-{tenant_id}",
-        status="1",
-        menu_id=next_id(),
-    )
-    tenant_only = Menu(
-        tenant_id=tenant_id,
-        parent_id=None,
-        menu_name="Tenant only",
-        menu_type="C",
-        component="layout.base$view.home",
-        route_name=f"tenant_only_{tenant_id}",
-        route_path=f"/tenant-only-{tenant_id}",
-        status="1",
-        menu_id=next_id(),
-    )
-    stale_platform_only = Menu(
-        tenant_id=tenant_id,
-        parent_id=None,
-        menu_name="Legacy tenant AI Agent management",
-        menu_type="C",
-        component="layout.base$view.ai_agent",
-        route_name="ai_agent",
-        route_path="/ai/agent",
-        status="1",
-        menu_id=next_id(),
-    )
-    db_session.add(tenant)
-    await db_session.flush()
-    db_session.add_all([default_only, tenant_only, stale_platform_only])
-    await db_session.flush()
-    current_user = SimpleNamespace(
-        tenant_id=tenant_id,
-        user_name="tenantadmin",
-        roles=[Role(role_code=SUPER_ADMIN_ROLE_CODE, status="1")],
-    )
-
-    response = await get_user_routes(current_user=current_user, db=db_session)
-    names = _route_names(response.data["routes"])
-    assert tenant_only.route_name in names
-    assert default_only.route_name not in names
-    assert stale_platform_only.route_name not in names
+async def test_super_admin_routes_and_existence_are_tenant_scoped(system_sessions):
+    _, plain = system_sessions
+    async with plain() as db:
+        await db.execute(
+            update(Role)
+            .where(Role.tenant_id == 1, Role.role_id == 202)
+            .values(role_code="R_SUPER")
+        )
+        await db.execute(
+            insert(user_roles).values(tenant_id=1, user_id=102, role_id=202)
+        )
+        for tenant, mid, name in (
+            (0, 901, "default_only"),
+            (1, 902, "tenant_only"),
+            (1, 903, "ai_agent"),
+        ):
+            await db.execute(
+                insert(Menu).values(
+                    tenant_id=tenant,
+                    menu_id=mid,
+                    menu_name=name,
+                    menu_type="C",
+                    component="layout.base$view.home",
+                    route_name=name,
+                    route_path="/" + name,
+                    status="1",
+                )
+            )
+        await db.commit()
+    runtime = AuthorizationRuntime(plain.kw["bind"])
+    identity = {
+        "tenant": TenantContext(1, "plan-1", 102, 1, "access_token"),
+        "actor_user_version": 1,
+    }
+    response = await runtime.relation_read(**identity, operation="runtime.routes")
+    names = route_names(response["routes"])
     assert (
-        await is_route_exist(
-            route_name=tenant_only.route_name,
-            current_user=current_user,
-            db=db_session,
-        )
-    ).data is True
-    assert (
-        await is_route_exist(
-            route_name=default_only.route_name,
-            current_user=current_user,
-            db=db_session,
-        )
-    ).data is False
-    assert (
-        await is_route_exist(
-            route_name=stale_platform_only.route_name,
-            current_user=current_user,
-            db=db_session,
-        )
-    ).data is False
-
-    persisted = await db_session.scalar(
-        select(Menu).where(
-            Menu.tenant_id == tenant_id,
-            Menu.route_name == tenant_only.route_name,
-        )
+        "tenant_only" in names
+        and "default_only" not in names
+        and "ai_agent" not in names
     )
-    assert persisted is tenant_only
+    for name, expected in (
+        ("tenant_only", True),
+        ("default_only", False),
+        ("ai_agent", False),
+    ):
+        assert (
+            await runtime.relation_read(
+                **identity, operation="runtime.exists", query=name
+            )
+            is expected
+        )
+    async with plain() as db:
+        persisted = await db.scalar(
+            select(Menu).where(Menu.tenant_id == 1, Menu.route_name == "tenant_only")
+        )
+        assert persisted.menu_id == 902 and persisted.tenant_id == 1
+
+
+@pytest.mark.parametrize("tenant_id", [0, 1])
+async def test_runtime_exists_matches_visible_tree_without_management_grants(
+    plan_sessions, tenant_id
+):
+    _, plain = plan_sessions
+    user_id, role_id = 101 + tenant_id, 201 + tenant_id
+    async with plain.kw["bind"].begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    async with plain() as db:
+        await db.execute(
+            insert(user_roles).values(
+                tenant_id=tenant_id, user_id=user_id, role_id=role_id
+            )
+        )
+        for mid, owner, name, status, parent in (
+            (901, tenant_id, "visible", "1", None),
+            (902, tenant_id, "not_granted", "1", None),
+            (903, tenant_id, "disabled", "2", None),
+            (904, tenant_id, "orphan", "1", 902),
+            (905, 1 - tenant_id, "other_tenant", "1", None),
+        ):
+            await db.execute(
+                insert(Menu).values(
+                    tenant_id=owner,
+                    menu_id=mid,
+                    menu_name=name,
+                    menu_type="C",
+                    component="layout.base$view.home",
+                    route_name=name,
+                    route_path="/" + name,
+                    status=status,
+                    parent_id=parent,
+                )
+            )
+            if owner == tenant_id and name != "not_granted":
+                await db.execute(
+                    insert(role_menus).values(
+                        tenant_id=tenant_id, role_id=role_id, menu_id=mid
+                    )
+                )
+        await db.commit()
+    runtime = AuthorizationRuntime(plain.kw["bind"])
+    identity = {
+        "tenant": TenantContext(
+            tenant_id, f"plan-{tenant_id}", user_id, 1, "access_token"
+        ),
+        "actor_user_version": 1,
+    }
+    visible = route_names(
+        (await runtime.relation_read(**identity, operation="runtime.routes"))["routes"]
+    )
+    assert visible == {"visible"}
+    for name in (
+        "visible",
+        "not_granted",
+        "disabled",
+        "orphan",
+        "other_tenant",
+        "absent",
+        "ai_provider",
+        "ai_agent",
+        "tenant",
+    ):
+        assert await runtime.relation_read(
+            **identity, operation="runtime.exists", query=name
+        ) is (name in visible)

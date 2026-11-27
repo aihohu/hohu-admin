@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Index,
     Integer,
@@ -12,6 +13,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.id_generator import next_id
@@ -29,7 +31,17 @@ class AiOperationLog(Base):
     """
 
     __tablename__ = "ai_operation_log"
+    field_authority: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    result_field_authority: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     __table_args__ = (
+        CheckConstraint(
+            "result_field_authority IS NULL OR (jsonb_typeof(result_field_authority) = 'object' AND pg_column_size(result_field_authority) <= 4194304)",
+            name="ck_ai_operation_log_result_authority",
+        ),
         UniqueConstraint(
             "tenant_id",
             "tool_call_id",

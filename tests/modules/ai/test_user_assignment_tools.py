@@ -15,10 +15,13 @@ from app.constants import (
     STATUS_DISABLED,
     STATUS_ENABLED,
 )
-from app.core.exceptions import AuthorizationException, BusinessRuleException
+from app.core.exceptions import (
+    AuthenticationException,
+    AuthorizationException,
+    BusinessRuleException,
+)
 from app.core.id_generator import next_id
 from app.db.base import user_depts
-from app.modules.ai.agents.gateway import atomic_execution
 from app.modules.ai.agents.gateway import executor as gateway_executor
 from app.modules.ai.agents.gateway.executor import _build_direct_confirmation_fields
 from app.modules.ai.agents.gateway.result import ToolResult
@@ -559,7 +562,7 @@ def test_update_dept_confirmation_binds_complete_collection() -> None:
     ]
 
 
-async def test_approved_execution_injects_server_business_snapshot() -> None:
+async def test_approved_execution_rejects_unverified_request_identity() -> None:
     expected = ToolResult.success(data={"updated": 1})
     registered = RegisteredTool(
         meta=user_assignment_tools.user_update_dept.__ai_tool_meta__,
@@ -592,60 +595,9 @@ async def test_approved_execution_injects_server_business_snapshot() -> None:
         snapshot_hash=canonical_payload_hash(snapshot),
     )
     claim = ClaimBinding.from_action(action, log_id=9004)
-    tool_db = AsyncMock(spec=AsyncSession)
-    tool_db.begin = AsyncMock()
-    tool_context = SimpleNamespace(db=tool_db)
-
-    async def immediate_timeout(awaitable, *, tenant):
-        assert tenant == deps.tenant
-        return await awaitable
-
-    with (
-        patch.object(
-            gateway_executor,
-            "validate_prepared_execution",
-            return_value=registered,
-        ),
-        patch.object(atomic_execution, "AsyncSessionLocal", return_value=tool_db),
-        patch.object(
-            atomic_execution.atomic_completion_service,
-            "lock_claim",
-            AsyncMock(return_value=SimpleNamespace(action=action)),
-        ),
-        patch.object(
-            atomic_execution.prepared_action_service, "validate_snapshot", AsyncMock()
-        ),
-        patch.object(
-            atomic_execution.prepared_action_service, "validate_data_scope_snapshot"
-        ),
-        patch.object(atomic_execution, "ensure_current_write_authority", AsyncMock()),
-        patch.object(atomic_execution, "with_l3_timeout", immediate_timeout),
-        patch.object(
-            atomic_execution, "build_tool_context", return_value=tool_context
-        ) as build_context,
-        patch.object(
-            atomic_execution.atomic_completion_service, "complete_success", AsyncMock()
-        ) as complete,
-        patch.object(atomic_execution, "clear_failures", AsyncMock()),
-        patch.object(gateway_executor, "_invoke_tool_fn", AsyncMock()) as legacy_invoke,
-    ):
-        result = await gateway_executor.execute_approved_prepared_action(
-            claim,
-            deps,
-        )
-
-    assert result is expected
-    build_context.assert_called_once_with(
-        deps,
-        tool_db,
-        registered.meta,
-        approved_business_snapshot={"version": "approved"},
-    )
-    registered.fn.assert_awaited_once_with(tool_context, **frozen_args)
-    complete.assert_awaited_once()
-    assert complete.await_args.args[0] is tool_db
-    assert complete.await_args.kwargs["result"] is expected
-    legacy_invoke.assert_not_awaited()
+    with pytest.raises(AuthenticationException):
+        await gateway_executor.execute_approved_prepared_action(claim, deps)
+    registered.fn.assert_not_awaited()
 
 
 async def test_write_execution_without_server_claim_is_rejected() -> None:

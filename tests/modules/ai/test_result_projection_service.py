@@ -1,5 +1,7 @@
 """P1-D authorization-lineage and fail-closed projection tests."""
 
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
@@ -10,9 +12,12 @@ from tenant_helpers import tenant_context
 from app.constants import STATUS_ENABLED
 from app.core.config import settings
 from app.core.exceptions import AuthorizationException
+from app.modules.ai.service.delivery_source_domains import with_sources
+from app.modules.ai.service.field_authority_runtime import ai_field_authority
 from app.modules.ai.service.result_projection_service import (
     DATA_SCOPE_RESOLVER_VERSION,
     ProjectionLineage,
+    _download_signing_key,
     result_projection_service,
 )
 from app.modules.system.service.grant_authority import grant_authority_service
@@ -20,8 +25,31 @@ from app.modules.system.service.role_management_service import role_management_s
 from app.modules.system.service.user_role_assignment_service import (
     user_role_assignment_service,
 )
+from tests.modules.ai.test_field_authority import evidence
 
 TENANT = tenant_context(actor_user_id=101)
+
+
+@pytest.fixture(autouse=True)
+def isolated_current_field_gate(monkeypatch):
+    """These units isolate subject/tool/dependency layers from the real G/B owner.
+
+    Source revalidation has committed integration tests. Explicit None/legacy
+    evidence still reaches the real structural refusal before this mocked gate.
+    """
+    original = result_projection_service.freeze_lineage
+
+    def freeze(**kwargs):
+        if "field_authority" not in kwargs:
+            tenant = kwargs["tenant"]
+            kwargs["field_authority"] = with_sources(
+                evidence(tenant_id=tenant.tenant_id, actor_id=tenant.actor_user_id),
+                ({"kind": "input", "read": ["content"]},),
+            )
+        return original(**kwargs)
+
+    monkeypatch.setattr(result_projection_service, "freeze_lineage", freeze)
+    monkeypatch.setattr(ai_field_authority, "visible", AsyncMock(return_value=True))
 
 
 def _user(*permissions: str, user_id: int = 101):
@@ -35,6 +63,7 @@ def _user(*permissions: str, user_id: int = 101):
     )
     return SimpleNamespace(
         user_id=user_id,
+        auth_version=1,
         user_name="alice",
         roles=[role],
         depts=[],
@@ -113,7 +142,7 @@ async def test_projection_requires_owner_tenant_and_current_chat_permission() ->
     )
 
 
-async def test_projection_accepts_complete_empty_lineage_for_plain_assistant_text() -> (
+async def test_plain_assistant_lineage_without_source_receipt_cannot_license_text() -> (
     None
 ):
     user = _user("ai:chat:use")
@@ -122,6 +151,7 @@ async def test_projection_accepts_complete_empty_lineage_for_plain_assistant_tex
         agent_code="shared",
         tool_codes=[],
         subject_refs=[],
+        field_authority=None,
     )
 
     with patch.object(
@@ -136,7 +166,7 @@ async def test_projection_accepts_complete_empty_lineage_for_plain_assistant_tex
             lineage=lineage,
         )
 
-    assert allowed is True
+    assert allowed is False
 
 
 async def test_role_assignment_projection_rechecks_conditional_role_permission() -> (
@@ -425,6 +455,13 @@ async def test_generic_projection_reauthorizes_message_dependencies() -> None:
         projection_dependency_message_ids=[100],
     )
 
+    assert not await result_projection_service.authorize_result_projection(
+        db,
+        user,
+        owner_user_id=user.user_id,
+        lineage=replace(lineage, field_authority=None),
+    )
+    db.execute.reset_mock()
     with (
         patch.object(
             result_projection_service,
@@ -436,16 +473,24 @@ async def test_generic_projection_reauthorizes_message_dependencies() -> None:
             "_authorize_subjects",
             AsyncMock(return_value=True),
         ),
+        patch.object(
+            result_projection_service,
+            "authorize_result_projection",
+            AsyncMock(return_value=True),
+        ) as authorize,
     ):
-        allowed = await result_projection_service.authorize_result_projection(
+        # Isolate dependency traversal; its current body gate is independently
+        # covered by the real owner integration tests and the refusal above.
+        allowed = await result_projection_service._authorize_projection_dependencies(
             db,
             user,
             owner_user_id=user.user_id,
-            lineage=lineage,
+            dependency_message_ids=lineage.projection_dependency_message_ids,
         )
 
     assert allowed is True
     db.execute.assert_awaited_once()
+    authorize.assert_awaited_once()
 
 
 async def test_scope_bound_projection_requires_exact_hash_and_resolver_version() -> (
@@ -542,7 +587,10 @@ async def test_data_scope_hash_tracks_every_enabled_scope_kind() -> None:
     assert union_hash != dept_only_hash
 
 
-async def test_download_token_is_owner_resource_and_projection_bound() -> None:
+@pytest.mark.parametrize("with_fields", [False, True])
+async def test_download_codec_binding_does_not_authorize_source_less_issuance(
+    with_fields,
+) -> None:
     user = _user("ai:chat:use")
     other_user = _user("ai:chat:use", user_id=999)
     lineage = result_projection_service.freeze_lineage(
@@ -552,6 +600,9 @@ async def test_download_token_is_owner_resource_and_projection_bound() -> None:
         subject_refs=[{"type": "user_export_task", "id": "exp-1"}],
         data_scope_hash="scope-1",
         projection_dependency_message_ids=[123],
+        field_authority=evidence(tenant_id=TENANT.tenant_id, actor_id=user.user_id)
+        if with_fields
+        else None,
     )
 
     with patch.object(
@@ -568,7 +619,33 @@ async def test_download_token_is_owner_resource_and_projection_bound() -> None:
             lineage=lineage,
         )
 
-    assert token is not None
+    assert token is None  # Even a mocked body gate cannot replace the owner.
+    payload = {
+        "type": "ai_result_download",
+        "sub": str(user.user_id),
+        "tenantId": TENANT.tenant_id,
+        "resourceType": "user_export",
+        "resourceId": "exp-1",
+        "projection": {
+            "agentCode": lineage.agent_code,
+            "toolCodes": list(lineage.tool_codes),
+            "subjectRefs": list(lineage.subject_refs),
+            "subjectRefsHash": lineage.subject_refs_hash,
+            "dataScopeHash": lineage.data_scope_hash,
+            "resolverVersion": lineage.resolver_version,
+            "projectionDependencyMessageIds": list(
+                lineage.projection_dependency_message_ids
+            ),
+            **(
+                {"fieldAuthority": lineage.field_authority}
+                if lineage.field_authority
+                else {}
+            ),
+        },
+        "projectionHash": result_projection_service.projection_hash(lineage),
+        "exp": datetime.now(UTC) + timedelta(minutes=5),
+    }
+    token = jwt.encode(payload, _download_signing_key(), algorithm=settings.ALGORITHM)
     with pytest.raises(JWTError):
         jwt.decode(
             token,
@@ -615,12 +692,13 @@ async def test_refresh_download_urls_replaces_persisted_token() -> None:
         tool_codes=["user.export"],
         subject_refs=[{"type": "user_export_task", "id": "exp-1"}],
         data_scope_hash="scope-1",
+        field_authority=evidence(tenant_id=TENANT.tenant_id, actor_id=user.user_id),
     )
     with patch.object(
         result_projection_service,
         "issue_download_token",
         AsyncMock(return_value="fresh-token"),
-    ):
+    ) as issue:
         refreshed = await result_projection_service.refresh_download_urls(
             AsyncMock(),
             user,
@@ -632,3 +710,4 @@ async def test_refresh_download_urls_replaces_persisted_token() -> None:
         )
 
     assert refreshed["downloadUrl"].endswith("token=fresh-token")
+    assert issue.call_args.kwargs["lineage"].field_authority == lineage.field_authority

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.exceptions import (
     AuthorizationException,
+    BusinessException,
     BusinessRuleException,
     NotFoundException,
 )
@@ -21,7 +22,13 @@ from app.core.file_storage import validate_private_storage_roots
 from app.core.id_generator import next_id
 from app.core.tenant import TenantContext
 from app.core.tenant_scope import tenant_select
+from app.modules.system.field_policy.file_sources import (
+    FileContentSnapshot,
+    require_file_manifest,
+)
 from app.modules.system.models.file import File
+from app.modules.system.models.setting import SystemSetting
+from app.modules.system.models.user import User
 from app.modules.system.schemas.file import FileQuery
 from app.modules.system.service.file_policy_service import (
     SCENARIO_CAPS,
@@ -54,12 +61,61 @@ class FileService:
     async def is_public_upload(self, db: AsyncSession, file_url: str) -> bool:
         """Cross-tenant public classification; never return file metadata."""
         records = (
-            await db.scalars(select(File).where(File.file_url == file_url))
+            await db.scalars(select(File).where(File.file_url == file_url).limit(2))
         ).all()
-        return bool(records) and all(
-            record.del_flag == "0"
-            and record.business_type not in PRIVATE_BUSINESS_TYPES | {"ai-chat"}
-            for record in records
+        if len(records) != 1:
+            return False
+        record = records[0]
+        if record.del_flag != "0" or record.file_ext not in PUBLIC_IMAGE_TYPES:
+            return False
+        if record.delivery_class == "public-image":
+            try:
+                require_file_manifest(
+                    FileContentSnapshot(
+                        record.tenant_id,
+                        record.file_id,
+                        record.owner_user_id,
+                        "",
+                        record.file_ext,
+                        record.mime_type,
+                        record.file_size,
+                        record.delivery_class,
+                        record.content_sha256,
+                        record.source_manifest,
+                    )
+                )
+                return True
+            except BusinessException:
+                return False
+        if record.delivery_class != "legacy-unknown" or record.business_type not in {
+            "avatar",
+            "brand",
+        }:
+            return False
+        urls = (file_url, settings.SERVER_URL.rstrip("/") + file_url)
+        if record.business_type == "avatar":
+            return bool(
+                await db.scalar(
+                    select(User.user_id)
+                    .where(
+                        User.tenant_id == record.tenant_id,
+                        User.user_id == record.owner_user_id,
+                        User.user_avatar.in_(urls),
+                    )
+                    .limit(1)
+                )
+            )
+        return bool(
+            await db.scalar(
+                select(SystemSetting.setting_id)
+                .where(
+                    SystemSetting.tenant_id == record.tenant_id,
+                    SystemSetting.setting_key.in_(("site_logo", "default_avatar")),
+                    SystemSetting.setting_value.in_(urls),
+                    SystemSetting.status == "1",
+                )
+                .limit(1)
+            )
         )
 
     async def read_chat_image(

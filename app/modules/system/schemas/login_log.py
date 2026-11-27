@@ -30,11 +30,11 @@ class LoginLogOut(BaseModel):
 
     login_log_id: int
     user_id: int | None
-    username: str
+    username: str | None = None
     ip: str | None
     user_agent: str | None
     status: str
-    message: str | None
+    message: str | None = None
     login_time: datetime
 
     @field_serializer("login_log_id")

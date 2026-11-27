@@ -51,12 +51,14 @@ from app.modules.ai.agents.tools.decorator import ai_tool
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.agents.tools.registry import ToolRegistry, compute_available_tools
 from app.modules.ai.core.context import ChatDeps, DataScopeContext
+from tests.modules.ai.gateway_protocol_boundary import install_protocol_boundaries
 from tests.modules.ai.test_completion_log_context import context_case as context_case
 
 
 @pytest.fixture(autouse=True)
 async def clean_env(monkeypatch, context_case):
     """Isolate transport state and bind synthetic authority to a real chat source."""
+    install_protocol_boundaries(monkeypatch)
     monkeypatch.setattr(ToolRegistry, "_instance", ToolRegistry())
     monkeypatch.setattr(sys.modules[__name__], "_TOOLS_REGISTERED", False)
     original_pool = redis_module.redis_pool
@@ -327,7 +329,7 @@ def _build_deps(
 
 
 def _mock_durable_success(monkeypatch) -> None:  # noqa: ANN001
-    async def fake_terminal_result(confirmation_id, *, tenant):  # noqa: ARG001
+    async def fake_terminal_result(confirmation_id, *, tenant, **_binding):  # noqa: ARG001
         return ToolResult.success({"approved": True}), 1
 
     monkeypatch.setattr(
@@ -640,7 +642,7 @@ class TestCase10InjectionDetector:
         assert result.ok is True
 
         # injection_hit=True 时操作日志标记为安全事件。
-        from app.db.session import AsyncSessionLocal
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             res = await db.execute(

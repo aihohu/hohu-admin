@@ -22,7 +22,9 @@ class DictDataBase(BaseModel):
         description="状态：1-启用，2-禁用",
     )
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid"
+    )
 
     @field_validator("dict_label")
     @classmethod
@@ -73,7 +75,9 @@ class DictDataUpdate(BaseModel):
     is_default: str | None = Field(None, description="是否默认：Y-是，N-否")
     status: str | None = Field(None, description="状态：1-启用，2-禁用")
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid"
+    )
 
     @field_validator("dict_label")
     @classmethod
@@ -138,4 +142,6 @@ class DictDataQuery(BaseModel):
             raise ValueError("状态必须是 1(启用) 或 2(禁用)")
         return v
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid"
+    )

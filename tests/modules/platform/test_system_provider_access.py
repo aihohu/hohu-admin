@@ -1,19 +1,38 @@
 """Model administration uses the normal system role and user audit identity."""
 
-from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import insert, select, update
 
-from app.core.base_response import PageResult
 from app.core.security import create_platform_access_token
+from app.core.tenant import TenantContext
+from app.db.authorization_runtime import AuthorizationRuntime
+from app.db.base import user_roles
 from app.db.session import get_db
 from app.main import app
+from app.modules.ai.core.provider_egress import provider_egress
 from app.modules.ai.service.provider_service import provider_service
-from app.modules.auth.api import get_user_routes, is_route_exist
 from app.modules.auth.service import get_current_user
-from app.modules.platform import system_agent_auth
+from app.modules.platform.authorization_catalog_read import catalog_read_candidate
+from app.modules.system.models.operation_log import SysOperationLog
+from app.modules.system.models.role import Role
+from tests.modules.platform.test_authorization_catalog_http import (
+    catalog_http as catalog_http,
+)
+from tests.modules.platform.test_authorization_catalog_http import (
+    catalog_sessions as catalog_sessions,
+)
+from tests.modules.platform.test_authorization_catalog_http import (
+    http_system as http_system,
+)
+from tests.modules.platform.test_authorization_catalog_http import (
+    plan_sessions as plan_sessions,
+)
+from tests.modules.platform.test_authorization_catalog_http import (
+    system_sessions as system_sessions,
+)
 
 
 def _actor(tenant=0, role=True, status="1"):
@@ -90,30 +109,22 @@ async def test_provider_routes_reject_non_system_roles(
 
 
 async def test_provider_list_accepts_normal_system_role_and_records_user(
-    client, monkeypatch
+    catalog_http, monkeypatch
 ):
-    db = AsyncMock()
-    db.add = Mock()
-    business = AsyncMock(
-        return_value=PageResult(records=[], total=0, current=1, size=10)
+    client, plain = catalog_http
+    monkeypatch.setattr(
+        provider_egress, "is_configuration_allowed", AsyncMock(return_value=True)
     )
-    persist = AsyncMock(return_value=101)
-    monkeypatch.setattr(provider_service, "get_list", business)
-    monkeypatch.setattr(system_agent_auth, "persist_system_agent_audit", persist)
-    app.dependency_overrides[get_current_user] = _actor
-    app.dependency_overrides[get_db] = lambda: db
-    try:
-        response = await client.get("/platform/ai/providers", headers=_headers())
-    finally:
-        app.dependency_overrides.pop(get_current_user, None)
-        app.dependency_overrides.pop(get_db, None)
-    assert response.status_code == 200
-    business.assert_awaited_once()
-    assert persist.await_args.kwargs["user_id"] == 123
-    audit = db.add.call_args.args[0]
-    assert audit.user_id == 123
-    assert audit.module == "模型管理"
-    assert audit.audit_scope == "platform"
+    response = await client.get("/platform/ai/providers", headers=_headers())
+    assert response.status_code == 200, response.text
+    async with plain() as db:
+        rows = (
+            await db.scalars(
+                select(SysOperationLog).where(SysOperationLog.audit_scope == "platform")
+            )
+        ).all()
+        assert len(rows) == 2 and all(row.user_id == 101 for row in rows)
+        assert {row.action for row in rows} == {"authorized", "completed"}
 
 
 async def test_old_platform_token_cannot_manage_providers(client):
@@ -125,78 +136,85 @@ async def test_old_platform_token_cannot_manage_providers(client):
     assert response.status_code == 401
 
 
-async def test_provider_missing_audit_context_never_calls_business(client, monkeypatch):
-    business = AsyncMock()
-    persist = AsyncMock(return_value=101)
-    monkeypatch.setattr(provider_service, "get_list", business)
-    monkeypatch.setattr(system_agent_auth, "persist_system_agent_audit", persist)
-    app.dependency_overrides[get_current_user] = _actor
-    app.dependency_overrides[get_db] = lambda: AsyncMock()
-    try:
-        response = await client.get("/platform/ai/providers")
-    finally:
-        app.dependency_overrides.pop(get_current_user, None)
-        app.dependency_overrides.pop(get_db, None)
-    assert response.status_code == 400
+async def test_provider_missing_audit_context_never_calls_business(
+    catalog_http, monkeypatch
+):
+    client, plain = catalog_http
+    business = AsyncMock(side_effect=AssertionError("Denied read cannot project"))
+    monkeypatch.setattr(catalog_read_candidate, "project", business)
+    client.headers.pop("X-Platform-Reason")
+    response = await client.get("/platform/ai/providers")
+    assert response.status_code == 400, response.text
     assert response.json()["errorCode"] == "PLATFORM_AUDIT_CONTEXT_REQUIRED"
     business.assert_not_awaited()
+    async with plain() as db:
+        rows = (
+            await db.scalars(
+                select(SysOperationLog).where(SysOperationLog.audit_scope == "platform")
+            )
+        ).all()
+        assert len(rows) == 1 and rows[0].action == "denied"
 
 
 async def test_provider_create_returns_only_credential_state_and_audits_user(
-    client, monkeypatch
+    catalog_http,
 ):
-    record = SimpleNamespace(
-        provider_id=101,
-        provider_code="test",
-        name="Test",
-        api_key="encrypted-secret",
-        base_url=None,
-        is_enabled=True,
-        config=None,
-        create_time=datetime.now(UTC),
+    client, plain = catalog_http
+    response = await client.post(
+        "/platform/ai/providers",
+        json={"providerCode": "deepseek", "name": "Test", "apiKey": "input-secret"},
+        headers=_headers(),
     )
-    business = AsyncMock(return_value=record)
-    db = AsyncMock()
-    db.add = Mock()
-    monkeypatch.setattr(provider_service, "create", business)
-    monkeypatch.setattr(
-        system_agent_auth, "persist_system_agent_audit", AsyncMock(return_value=101)
-    )
-    app.dependency_overrides[get_current_user] = _actor
-    app.dependency_overrides[get_db] = lambda: db
-    try:
-        response = await client.post(
-            "/platform/ai/providers",
-            json={"providerCode": "test", "name": "Test", "apiKey": "input-secret"},
-            headers=_headers(),
-        )
-    finally:
-        app.dependency_overrides.pop(get_current_user, None)
-        app.dependency_overrides.pop(get_db, None)
-    assert response.status_code == 200
-    assert response.json()["data"]["providerId"] == "101"
+    assert response.status_code == 200, response.text
+    assert isinstance(response.json()["data"]["providerId"], str)
     assert response.json()["data"]["credentialConfigured"] is True
     assert "apiKey" not in response.json()["data"]
     assert "secret" not in response.text
-    assert "secret" not in db.add.call_args.args[0].request_params
+    async with plain() as db:
+        audit = (await db.execute(select(SysOperationLog))).scalars().all()
+        assert len(audit) == 2
+        assert all(row.user_id == 101 for row in audit)
+        assert all("input-secret" not in row.request_params for row in audit)
 
 
 @pytest.mark.parametrize(
-    "tenant,role,expected", [(0, True, True), (12, True, False), (0, False, False)]
+    "tenant,role,expected", [(0, True, True), (1, True, False), (0, False, False)]
 )
 async def test_provider_menu_and_route_existence_follow_system_role(
-    tenant, role, expected
+    system_sessions, tenant, role, expected
 ):
-    db = AsyncMock()
-    db.execute.return_value.scalars = Mock(return_value=SimpleNamespace(all=lambda: []))
-    actor = _actor(tenant, role)
-    response = await get_user_routes(current_user=actor, db=db)
-    ai = next((r for r in response.data["routes"] if r.name == "ai"), None)
-    providers = [r for r in (ai.children if ai else []) if r.name == "ai_provider"]
+    _, plain = system_sessions
+    uid, rid = 101 + tenant, 201 + tenant
+    async with plain() as db:
+        await db.execute(
+            update(Role)
+            .where(Role.tenant_id == tenant, Role.role_id == rid)
+            .values(role_code="R_SUPER" if role else "R_USER")
+        )
+        if tenant:
+            await db.execute(
+                insert(user_roles).values(tenant_id=tenant, user_id=uid, role_id=rid)
+            )
+        await db.commit()
+    runtime = AuthorizationRuntime(plain.kw["bind"])
+    identity = {
+        "tenant": TenantContext(tenant, "plan-" + str(tenant), uid, 1, "access_token"),
+        "actor_user_version": 1,
+    }
+    response = await runtime.relation_read(**identity, operation="runtime.routes")
+    ai = next((r for r in response["routes"] if r["name"] == "ai"), None)
+    providers = [
+        r for r in (ai.get("children", []) if ai else []) if r["name"] == "ai_provider"
+    ]
     assert bool(providers) is expected
     if expected:
-        assert providers[0].path == "/ai/provider"
-        assert providers[0].meta.title == "模型管理"
+        assert (
+            providers[0]["path"] == "/ai/provider"
+            and providers[0]["meta"]["title"] == "模型管理"
+        )
     assert (
-        await is_route_exist(route_name="ai_provider", current_user=actor, db=db)
-    ).data is expected
+        await runtime.relation_read(
+            **identity, operation="runtime.exists", query="ai_provider"
+        )
+        is expected
+    )

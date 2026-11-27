@@ -133,11 +133,14 @@ class TestPermPrefix:
 
 
 class TestBuildDynamicBlock:
-    def test_includes_user_identity(self) -> None:
+    def test_excludes_business_identity_and_uses_authenticated_actor_control(
+        self,
+    ) -> None:
         deps = _make_deps(user_name="alice", user_id=42)
         block = build_dynamic_block(deps)
-        assert "alice" in block
-        assert "id=42" in block
+        assert "alice" not in block
+        assert "id=42" not in block
+        assert "authenticated tenant actor" in block
 
     def test_includes_trace_id(self) -> None:
         deps = _make_deps(trace_id="tr_xyz789")
@@ -179,7 +182,7 @@ class TestBuildDynamicBlock:
         block = build_dynamic_block(deps)
 
         assert "限定部门" in block
-        assert "1 个部门" in block
+        assert "1 个部门" not in block
 
     def test_dept_limited_scope_description(self) -> None:
         """DATA_SCOPE_DEPT/CUSTOM：可见多个部门"""
@@ -191,7 +194,7 @@ class TestBuildDynamicBlock:
         )
         block = build_dynamic_block(deps)
         assert "限定部门" in block
-        assert "3 个部门" in block
+        assert "3 个部门" not in block
 
     def test_permissions_do_not_imply_ungranted_actions(self) -> None:
         """List access must not imply edit/delete/export access."""

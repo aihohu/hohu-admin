@@ -27,6 +27,7 @@ from app.modules.ai.service.atomic_completion_service import (
 )
 from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.system.models.user import User
+from tests.ai_source_fixtures import authored_source
 
 
 @pytest.fixture
@@ -51,6 +52,9 @@ async def atomic_case(db_session):
     db_session.add(source)
     await db_session.flush()
     now = datetime.now(UTC)
+    source.field_authority = await authored_source(
+        db_session, tenant=tenant, message_id=source.message_id
+    )
     args = {"name": "atomic test"}
     snapshot = {"business": {"version": 1}}
     action = AiPreparedAction(
@@ -75,6 +79,7 @@ async def atomic_case(db_session):
         trace_id=token,
         agent_code="user_mgmt",
         tool_codes=["user.create"],
+        field_authority=source.field_authority,
         expires_at=now + timedelta(minutes=5),
         approved_by=user.user_id,
         approved_at=now,
@@ -82,6 +87,7 @@ async def atomic_case(db_session):
         execution_lease_expires_at=now + timedelta(minutes=1),
     )
     log = AiOperationLog(
+        field_authority=source.field_authority,
         tenant_id=0,
         user_id=user.user_id,
         conversation_id=conversation.conversation_id,

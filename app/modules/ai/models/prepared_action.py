@@ -15,6 +15,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.id_generator import next_id
@@ -26,6 +27,10 @@ class AiPreparedAction(Base):
 
     __tablename__ = "ai_prepared_action"
     __table_args__ = (
+        CheckConstraint(
+            "result_field_authority IS NULL OR (jsonb_typeof(result_field_authority) = 'object' AND pg_column_size(result_field_authority) <= 4194304)",
+            name="ck_ai_prepared_action_result_authority",
+        ),
         CheckConstraint(
             "status IN ('prepared', 'pending_confirmation', 'approved', "
             "'running', 'succeeded', 'failed', 'rejected', 'expired')",
@@ -80,6 +85,12 @@ class AiPreparedAction(Base):
     execute_tool_name: Mapped[str] = mapped_column(String(128), nullable=False)
 
     frozen_args: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    field_authority: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    result_field_authority: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     args_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)

@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.2.0]
+
+### System-wide Field Policies
+
+- Extend the shared field policy catalog to 23 objects, covering users, roles, departments, menus, dictionaries, configuration, settings, tasks, files, AI and audit delivery. Tenant-scoped revisions, role bindings and complete manifests support controlled preparation and explicit activation. Existing tenants remain in legacy mode until qualified activation; freezing preserves active policy history.
+- Combine functional permissions, per-role record scope, field purpose and cross-object provenance. Reading, creating, updating, querying, importing and exporting are separately controlled; ungranted fields are denied under enforced policies, and platform-fixed or secret-field restrictions cannot be widened by tenant policies.
+- Apply sparse projections and write validation to ordinary and relationship objects, dynamic configuration values and registered task dispatch. Protect registered import/export, template, error-file and download paths, including background delivery and current-authority checks for AI context, execution, confirmation and history. Preserve unresolved execution facts while hiding historical content without trustworthy field provenance.
+- Serialize authorization changes through the global and tenant guards, with epoch invalidation and a shared transaction plan for supported writers. Cached older Web submissions remain protected by server-side authorization.
+
+### Installation and Recovery
+
+- Handle Linux process disappearance during `/proc` reads by confirming kernel exit before accepting stopped-writer evidence. Permission, I/O and unknown process-state failures remain closed.
+- Pair Backend and Web 0.2.0. This entry prepares the candidate; only a validated product `release.json` establishes the released image combination, supported platforms and upgrade sources.
+- Add a host-controlled installation command that fences the database and old processes before migrating and seeding on retained connections. Successful preparation leaves admission closed; a separate, receipt-bound resume is required. CLI 0.1.16 can then start the manually pinned combination with `--no-migrate` only after those required steps have succeeded; its default seed command is not compatible with this maintenance protocol.
+- The candidate targets empty installation and original 0.1.6 upgrades to Alembic `e020f3b00001`. Back up matching databases, public/private files, keys and current revocation evidence. Never use `stamp head` or destructive downgrade as a substitute for recovery.
+- Fresh installations and 0.1.6 upgrades use controlled `prepare` with the standard Web build. Administrators preview, save and activate policies from System Management → Roles → Field Permissions at their existing console address. Resume checks the original database, current qualification, tenant manifests, stopped writers and in-flight transactions.
+- Dictionary upgrades reject multiple default items for the same tenant/type until an authorized data correction resolves them. Historical catalog expansion is supported only before activation within the controlled preparation protocol; newly introduced objects receive no automatic grants.
+- After activation, do not attach a 0.1.6 backend or reopen an old backup directly. Keep access closed until independent revocation/policy continuity and post-failure effects are reconciled, then recover forward with a field-policy-capable build. Final image and CLI acceptance is required before product publication; App/Desktop remain outside this release.
+
 ## [v0.1.6]
 
 ### Compatibility and Security Fixes

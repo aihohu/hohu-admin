@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -11,6 +12,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    Uuid,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -98,6 +100,13 @@ class SysJobLog(Base):
     __tablename__ = "sys_job_log"
     __table_args__ = (
         UniqueConstraint(
+            "tenant_id", "dispatch_id", name="uq_sys_job_log_tenant_dispatch"
+        ),
+        CheckConstraint(
+            "(dispatch_id IS NULL) = (dispatch_expires_at IS NULL)",
+            name="ck_sys_job_log_dispatch_pair",
+        ),
+        UniqueConstraint(
             "tenant_id", "job_log_id", name="uq_sys_job_log_tenant_log_id"
         ),
         ForeignKeyConstraint(
@@ -150,4 +159,8 @@ class SysJobLog(Base):
         String(64),
         nullable=True,
         comment="写入此日志的执行进程标识（uuid4，孤儿守护用）",
+    )
+    dispatch_id: Mapped[str | None] = mapped_column(Uuid(as_uuid=False), nullable=True)
+    dispatch_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )

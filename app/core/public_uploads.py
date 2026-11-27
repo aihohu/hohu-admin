@@ -46,4 +46,7 @@ class PublicUploadStaticFiles(StaticFiles):
             "/uploads/" + "/".join(parts)
         ):
             return Response(status_code=404, headers={"Cache-Control": "no-store"})
-        return await super().get_response(path, scope)
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response

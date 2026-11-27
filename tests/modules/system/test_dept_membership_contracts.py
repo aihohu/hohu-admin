@@ -8,11 +8,11 @@ from pydantic import ValidationError
 
 from app.modules.system.api.dept import get_dept_users, update_dept_users
 from app.modules.system.schemas.dept import DeptUsersOut, DeptUsersUpdate
+from app.modules.system.schemas.user_projection import UserMemberQuery
 from app.modules.system.service.user_department_assignment_service import (
     DepartmentMemberPage,
     DepartmentMemberRecord,
     DepartmentMembershipResult,
-    user_department_assignment_service,
 )
 from tests.tenant_helpers import tenant_context
 
@@ -82,20 +82,13 @@ async def test_department_member_api_delegates_to_shared_policy(
             ),
         ),
     )
-    list_mock = AsyncMock(return_value=page)
+    dto = DeptUsersOut.model_validate(page).model_dump(mode="json", by_alias=True)
+    list_mock = AsyncMock(return_value=dto)
     replace_mock = AsyncMock(
-        return_value=DepartmentMembershipResult(added=1, removed=2)
+        return_value={"result": DepartmentMembershipResult(added=1, removed=2)}
     )
-    monkeypatch.setattr(
-        user_department_assignment_service,
-        "list_department_members",
-        list_mock,
-    )
-    monkeypatch.setattr(
-        user_department_assignment_service,
-        "replace_department_members",
-        replace_mock,
-    )
+    monkeypatch.setattr("app.modules.system.api.dept.user_read", list_mock)
+    monkeypatch.setattr("app.modules.system.api.dept.system_write", replace_mock)
     db = AsyncMock()
     actor = SimpleNamespace(user_id=7)
     tenant = tenant_context(tenant_id=0, actor_user_id=7)
@@ -117,21 +110,21 @@ async def test_department_member_api_delegates_to_shared_policy(
         tenant=tenant,
     )
 
-    assert response.data.records[0].user_id == 11
+    assert response.data == dto
+    assert response.data["records"][0]["userId"] == "11"
     list_mock.assert_awaited_once_with(
         db,
-        actor_user_id=7,
-        dept_id=5,
-        query="ali",
-        current=2,
-        size=20,
+        actor,
+        operation="members",
+        query=UserMemberQuery(dept_id=5, query="ali", current=2, size=20),
         tenant=tenant,
     )
     replace_mock.assert_awaited_once_with(
         db,
-        actor_user_id=7,
-        dept_id=5,
-        user_ids=["11"],
+        actor,
+        operation="dept.members",
+        target_id=5,
+        payload=["11"],
         tenant=tenant,
     )
-    db.commit.assert_awaited_once()
+    db.commit.assert_not_awaited()
