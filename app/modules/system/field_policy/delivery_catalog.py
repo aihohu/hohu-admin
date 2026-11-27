@@ -15,7 +15,7 @@ from app.core.field_policy import (
 )
 from app.modules.system.field_policy.transfer_catalog import READ, transfer_catalog
 
-DELIVERY_CATALOG_REVISION = "system-fields/7-user-list"
+DELIVERY_CATALOG_REVISION = "system-fields/8-publication"
 CREATE = Access("create", "management.create")
 UPDATE = Access("update", "management.update")
 EQ = Access("eq", "management.query", "filter")
@@ -331,7 +331,7 @@ def previous_delivery_catalog():
 
 
 @lru_cache(maxsize=1)
-def delivery_catalog():
+def user_list_catalog():
     base = previous_delivery_catalog()
     objects, actions = dict(base.objects), dict(base.actions)
     ref = FieldRef("system.user", "user_phone")
@@ -350,3 +350,16 @@ def delivery_catalog():
         action, uses=(*action.uses, FieldUse(ref, SORT))
     )
     return Catalog(tuple(objects.values()), tuple(actions.values()))
+
+
+@lru_cache(maxsize=1)
+def delivery_catalog():
+    base = user_list_catalog()
+    actions = dict(base.actions)
+    publish = actions["config.publish"]
+    actions[publish.action_id] = replace(
+        publish,
+        uses=tuple(use for use in publish.uses if use.access == READ),
+        permission_codes=("system:config:publish",),
+    )
+    return Catalog(tuple(base.objects.values()), tuple(actions.values()))

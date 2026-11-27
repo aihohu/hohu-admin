@@ -5,7 +5,7 @@ from io import BytesIO
 
 import pytest
 from openpyxl import load_workbook
-from sqlalchemy import insert, select, update
+from sqlalchemy import delete, insert, select, update
 
 from app.core.config import settings
 from app.core.field_policy import FieldRef, Grant
@@ -229,52 +229,64 @@ async def test_phone_sort_requires_coverage_of_requested_scope(
 
 
 @pytest.mark.parametrize(
-    "attached_value", [False, True], ids=["unchanged-value", "undeclared-edit"]
+    "scenario", ["unchanged-value", "undeclared-edit", "stale-confirmation"]
 )
 async def test_config_publish_is_separate_from_writing_the_content(
-    tenant_id, parameters, parameter_http, monkeypatch, attached_value
+    tenant_id, parameters, parameter_http, monkeypatch, scenario
 ):
     client, plain = parameter_http
     target = 301 if tenant_id == 0 else 304
     form_params = {"mode": "update", "recordId": str(target)}
-    if attached_value:
-        original = await client.get("/config/form", params=form_params)
-        assert original.status_code == 200
-        original_revision = original.json()["data"]["publicationRevision"]
     await activate_relations(
         parameters,
         monkeypatch,
         tenant_id=tenant_id,
         missing=(("system.config", "config_value", "update"),),
     )
+    async with plain() as db:
+        await db.execute(
+            delete(role_menus).where(
+                role_menus.c.tenant_id == tenant_id,
+                role_menus.c.role_id == 201 + tenant_id,
+                role_menus.c.menu_id.in_(
+                    select(Menu.menu_id).where(Menu.permission == "system:config:edit")
+                ),
+            )
+        )
+        await db.commit()
     form = await client.get("/config/form", params=form_params)
     assert form.status_code == 200, form.text
     fields = form.json()["data"]
     assert fields["record"]["configValue"] == f"value-{target}"
-    assert (
-        "configValue" not in fields["fieldPolicy"]["update"]
-        and "config_value" not in fields["fieldPolicy"]["update"]
-    )
-    if attached_value:
-        payload = {
-            "confirmed": True,
-            "expectedRevision": fields.get("publicationRevision", original_revision),
-            "configValue": "edited",
-        }
-    else:
-        revision = fields.get("publicationRevision")
-        assert revision, "Publisher cannot confirm the unchanged value"
-        payload = {"confirmed": True, "expectedRevision": revision}
+    assert fields["fieldPolicy"]["update"] == []
+    revision = fields.get("publicationRevision")
+    assert revision, "Publisher cannot confirm the unchanged value"
+    payload = {"confirmed": True, "expectedRevision": revision}
+    expected_value = f"value-{target}"
+    if scenario == "undeclared-edit":
+        payload["configValue"] = "edited"
+    elif scenario == "stale-confirmation":
+        expected_value = "changed since confirmation"
+        async with plain() as db:
+            await db.execute(
+                update(Config)
+                .where(Config.tenant_id == tenant_id, Config.config_id == target)
+                .values(config_value=expected_value)
+            )
+            await db.commit()
     response = await client.put(f"/config/{target}/publication", json=payload)
     async with plain() as db:
         assert (
             await db.scalar(
                 select(Config.config_value).where(Config.config_id == target)
             )
-            == f"value-{target}"
+            == expected_value
         )
         published = list(await db.scalars(select(ConfigPublication.config_id)))
-    if attached_value:
+    if scenario == "stale-confirmation":
+        assert response.status_code == 409, response.text
+        assert published == []
+    elif scenario == "undeclared-edit":
         assert response.status_code in (403, 422), response.text
         error = response.json()
         if response.status_code == 422:
@@ -290,16 +302,16 @@ async def test_config_publish_is_separate_from_writing_the_content(
 
 
 @pytest.mark.parametrize(
-    "downgrade", [False, True], ids=["unrelated-change", "plain-to-masked"]
+    "change", ["unrelated-change", "plain-to-masked", "query-revoked"]
 )
 async def test_old_xlsx_checked_against_actual_content(
-    tenant_id, parameters, parameter_http, monkeypatch, downgrade
+    tenant_id, parameters, parameter_http, monkeypatch, change
 ):
     client, plain = parameter_http
     tenant = tenant_id
     await activate_relations(parameters, monkeypatch, tenant_id=tenant)
     path = "/user/export"
-    exported = await client.post(path, json={"reason": "field contract"})
+    exported = await client.post(path, json={"reason": "field contract", "status": "1"})
     assert exported.status_code == 200, exported.text[:160]
     phone = f"1390000000{tenant}"
 
@@ -323,15 +335,23 @@ async def test_old_xlsx_checked_against_actual_content(
     assert before.status_code == 200 and before.content == exported.content
     foreign = await client.get(url, headers=token(1 - tenant))
     assert foreign.status_code in (403, 404), foreign.status_code
-    obj = "system.user" if downgrade else "system.config"
+    obj = "system.config" if change == "unrelated-change" else "system.user"
     role = 201 + tenant
     rules = grants_for(tenant, role, obj)
-    if downgrade:
+    if change == "plain-to-masked":
         rules = [
             replace(g, level="masked", mask_id="phone/v1")
             if g.ref == FieldRef(obj, "user_phone") and g.access.operation == "export"
             else g
             for g in rules
+        ]
+    elif change == "query-revoked":
+        rules = [
+            g
+            for g in rules
+            if not (
+                g.ref.field_id == "status" and g.access.purpose == "management.query"
+            )
         ]
     else:
         rules = [g for g in rules if g.ref.field_id != "remark"]
@@ -353,7 +373,10 @@ async def test_old_xlsx_checked_against_actual_content(
     )
     await activate_candidates(policies, version + 1, tenant_id=tenant)
     after = await client.get(url)
-    if downgrade:
+    if change == "query-revoked":
+        assert after.status_code == 403, after.text[:160]
+        assert after.json()["errorCode"] == "FIELD_QUERY_DENIED"
+    elif change == "plain-to-masked":
         assert after.status_code == 403, after.status_code
         assert after.json()["errorCode"] == "FIELD_TRANSFER_REGENERATE_REQUIRED"
         fresh = await client.post(path, json={"reason": "regenerate masked"})

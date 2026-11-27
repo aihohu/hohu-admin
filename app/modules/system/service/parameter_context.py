@@ -134,6 +134,16 @@ class ParameterContext(RelationReadContext):
             if d.allowed
         )
 
+    def can_confirm_publication(self, record, action):
+        contract = self.catalog.actions[action]
+        if not set(contract.permission_codes) <= self.permissions:
+            return False
+        decisions = resolve_fields(self.catalog, self.rules, record, action, READ)
+        return all(
+            use.access == READ and decisions[use.ref.field_id].level == "plain"
+            for use in contract.uses
+        )
+
     def capabilities(self, record, *, hidden=()):
         surface = "config" if record.object_id == "system.config" else "job"
         decisions = self.decisions(record)

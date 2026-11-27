@@ -18,6 +18,7 @@ from app.modules.system.field_policy.control_catalog import control_catalog
 from app.modules.system.field_policy.delivery_catalog import (
     DELIVERY_CATALOG_REVISION,
     previous_delivery_catalog,
+    user_list_catalog,
 )
 from app.modules.system.field_policy.generic_compat import user_compat_object
 from app.modules.system.field_policy.ordinary_catalog import (
@@ -173,6 +174,7 @@ async def _prepare_catalog(db, *, fence, source_build):
             control_catalog(),
             transfer_catalog(),
             previous_delivery_catalog(),
+            user_list_catalog(),
             catalog,
         )
     }

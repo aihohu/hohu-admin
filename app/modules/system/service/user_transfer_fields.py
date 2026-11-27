@@ -6,6 +6,7 @@ provider selects current rules internally; no request supplies rules.
 
 from dataclasses import replace
 
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from app.core.config import settings
@@ -405,8 +406,13 @@ class UserTransferFields:
         document = lineage.get(kind) if type(lineage) is dict else None
         stamp = await self.stamp(db, tx, tenant_id=tenant.tenant_id)
         original_stamp = document.get("stamp") if type(document) is dict else None
+        # Generic exports record the rows, disclosure levels and relation sources
+        # needed to prove the original bytes against the active policy.
+        if kind == "export" and stamp.get("policy_kind") == "generic":
+            _reprove = _reprove or original_stamp != stamp
         if _reprove and (
             type(original_stamp) is not dict
+            or original_stamp.keys() != stamp.keys()
             or any(
                 original_stamp.get(k) != stamp.get(k)
                 for k in ("policy_kind", "catalog_digest", "catalog_revision", "build")
@@ -423,15 +429,23 @@ class UserTransferFields:
         )
         if kind == "export":
             if _reprove:
+                try:
+                    filters = exports.UserExportFilter.model_validate(
+                        row["filter_snapshot"]["filter"]
+                    )
+                except (KeyError, TypeError, ValidationError):
+                    raise transfer_denied() from None
+                if (
+                    stamp.get("policy_kind") == "generic"
+                    and filters.model_dump(mode="json")
+                    != row["filter_snapshot"]["filter"]
+                ):
+                    raise transfer_denied()
                 await self.coverage(
                     db,
                     tx,
                     context,
-                    export_query_plan(
-                        exports.UserExportFilter.model_validate(
-                            row["filter_snapshot"]["filter"]
-                        )
-                    ),
+                    export_query_plan(filters),
                     _after_plan=_after_plan,
                 )
             if stamp.get("policy_kind") == "generic":

@@ -17,7 +17,11 @@ from app.core.field_policy.documents import (
 )
 from app.core.id_generator import next_id
 from app.modules.system.field_policy import documents as legacy_documents
-from app.modules.system.field_policy.delivery_catalog import SORT, delivery_catalog
+from app.modules.system.field_policy.delivery_catalog import (
+    SORT,
+    delivery_catalog,
+    user_list_catalog,
+)
 from app.modules.system.field_policy.generic_compat import (
     convert_legacy_grants,
     user_compat_object,
@@ -167,8 +171,8 @@ async def migrate_legacy(db, *, fence, catalog, catalog_revision, source_build):
     require(user is not None)
     original_ids = {field.field_id for field in base.fields}
     originals = tuple(field for field in user.fields if field.field_id in original_ids)
-    if catalog.digest == delivery_catalog().digest:
-        # List sorting exists only in the reviewed current catalog. Legacy
+    if catalog.digest in {user_list_catalog().digest, delivery_catalog().digest}:
+        # List sorting exists in both reviewed catalog revisions. Legacy
         # documents never gain a sorting grant through import or replay.
         originals = tuple(
             replace(field, accesses=tuple(a for a in field.accesses if a != SORT))
