@@ -6,6 +6,7 @@ from pydantic.alias_generators import to_camel
 from sqlalchemy import and_, false, or_, select, true
 
 from app.core.authorization_plan import ResourceKind as K
+from app.core.exceptions import AuthorizationException
 from app.core.field_policy import (
     Access,
     FieldRef,
@@ -51,6 +52,7 @@ class RelationWriteContext:
     scopes: dict
     permissions: frozenset
     facts: dict
+    legacy_user_policy: bool = False
     memberships: dict = field(init=False)
 
     def __post_init__(self):
@@ -141,6 +143,7 @@ async def load_relation_write_context(
             raise denied()
     catalog = relation_catalog()
     grants = ()
+    legacy_user_policy = False
     if head is None:
         legacy = await active_policy_grants(
             db,
@@ -150,6 +153,7 @@ async def load_relation_write_context(
         )
         if legacy is None and not user_action:
             return None
+        legacy_user_policy = legacy is not None and user_action is not None
         grants = (
             convert_legacy_grants(tenant.tenant_id, legacy)
             if legacy is not None
@@ -189,7 +193,13 @@ async def load_relation_write_context(
         }
     )
     return RelationWriteContext(
-        tenant, actor, compile_rules(catalog, grants), scopes, permissions, facts
+        tenant,
+        actor,
+        compile_rules(catalog, grants),
+        scopes,
+        permissions,
+        facts,
+        legacy_user_policy=legacy_user_policy,
     )
 
 
@@ -310,7 +320,14 @@ async def validate_relation_system_fields(
     if operation.endswith("delete"):
         return context
     if operation.startswith("user.") or operation == "dept.members":
-        validate_generic_user_fields(context, operation, payload, target_id, new_id)
+        try:
+            validate_generic_user_fields(context, operation, payload, target_id, new_id)
+        except AuthorizationException as exc:
+            if context.legacy_user_policy and exc.error_code == "FIELD_POLICY_DENIED":
+                raise AuthorizationException(
+                    "无权修改所提供的字段", error_code="FIELD_WRITE_DENIED"
+                ) from exc
+            raise
     elif operation in {"role.create", "role.update", "dept.create", "dept.update"}:
         access = CREATE if operation.endswith("create") else UPDATE
         values = payload.model_dump(exclude_unset=access == UPDATE)
