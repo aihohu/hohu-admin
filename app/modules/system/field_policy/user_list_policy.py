@@ -10,6 +10,9 @@ FILTER = Access("contains", "management.query", "filter")
 EQ = Access("eq", "management.query", "filter")
 JOIN = Access("eq", "management.query", "join")
 SORT = Access("sort", "management.query", "sort")
+CREATE = Access("create", "management.create")
+UPDATE = Access("update", "management.update")
+PROFILE = ("user_name", "nickname", "user_gender", "status", "user_phone", "user_email")
 
 # References are to the actual public list projection. Structural user_id is fixed.
 USES = {
@@ -37,28 +40,32 @@ USES = {
         "roles": (JOIN,),
         "departments": (JOIN,),
     },
+    "create": dict.fromkeys((*PROFILE, "password"), (CREATE,)),
+    "update": dict.fromkeys(PROFILE, (UPDATE,)),
 }
-SENSITIVE = frozenset({"user_phone", "user_email", "roles", "departments"})
-DEFAULT = {"mode": "restrict_selected", "read": [], "query": []}
+SENSITIVE = frozenset({"user_phone", "user_email", "roles", "departments", "password"})
+DEFAULT = {"mode": "restrict_selected", **{purpose: [] for purpose in USES}}
 
 
 def selected_grants(tenant_id, role_id, policy):
     require(
         type(policy) is dict
-        and set(policy) in (set(DEFAULT), set(DEFAULT) | {"sensitive"})
+        and {"mode", "read", "query"} <= policy.keys() <= DEFAULT.keys() | {"sensitive"}
     )
     mode = policy["mode"]
     require(mode in ("allow_selected", "restrict_selected"))
-    positive = policy.get("sensitive", {"read": [], "query": []})
-    require(type(positive) is dict and positive.keys() == USES.keys())
+    positive = policy.get("sensitive", {})
+    require(type(positive) is dict and positive.keys() <= policy.keys() & USES.keys())
     result = []
     for purpose, fields in USES.items():
+        if purpose not in policy:
+            continue  # Older revisions keep their explicit rules for this purpose.
         names = policy[purpose]
         require(
             type(names) is list and all(type(n) is str and n in fields for n in names)
         )
         require(names == sorted(set(names)))
-        explicit = positive[purpose]
+        explicit = positive.get(purpose, [])
         require(
             type(explicit) is list
             and all(type(n) is str and n in SENSITIVE and n in fields for n in explicit)
@@ -122,11 +129,18 @@ def editor_defaults(document, active_grants, tenant_id, role_id):
         for name, accesses in fields.items()
         for a in accesses
     }
+    policy = document["list_policy"] if isinstance(document, dict) else {}
     raw = document["rules"] if isinstance(document, dict) else document
+    managed = {
+        (name, a)
+        for purpose in {"read", "query"} | (policy.keys() & USES.keys())
+        for name, accesses in USES[purpose].items()
+        for a in accesses
+    }
     remainder = [
         rule
         for rule in raw
-        if (rule["field_id"], Access(**rule["access"])) not in owned
+        if (rule["field_id"], Access(**rule["access"])) not in managed
     ]
     return {
         "list_fields": {p: sorted(fs) for p, fs in USES.items()},
@@ -162,7 +176,8 @@ def load_policy_rules(catalog, document, *, tenant_id, role_id, object_id):
         all(
             grant.access not in fields.get(grant.ref.field_id, ())
             for grant in others
-            for fields in USES.values()
+            for purpose, fields in USES.items()
+            if purpose in policy
         )
     )
     result = grants + others

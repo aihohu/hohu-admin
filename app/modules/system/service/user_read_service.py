@@ -15,8 +15,9 @@ from app.modules.system.field_policy.evaluator import FieldGrant
 from app.modules.system.field_policy.user_fields import USER_FIELDS
 from app.modules.system.schemas.login_log import LoginLogQuery
 from app.modules.system.schemas.operation_log import OperationLogQuery
-from app.modules.system.schemas.user import UserQuery
+from app.modules.system.schemas.user import UserQuery, UserWriteForm
 from app.modules.system.schemas.user_projection import UserMemberQuery
+from app.modules.system.service.relation_field_write_guard import user_write_form_fields
 from app.modules.system.service.relation_user_read import read_list, read_users
 from app.modules.system.service.user_field_active import active_policy_grants
 from app.modules.system.service.user_field_context import (
@@ -88,6 +89,14 @@ class UserReadService:
     ):
         tx.assert_session(db)
         tx.assert_planning(tenant.tenant_id)
+        if operation == "write-form" and type(query) is UserWriteForm:
+            return await user_write_form_fields(
+                db,
+                tx,
+                tenant=tenant,
+                actor_user_version=actor_user_version,
+                query=query,
+            )
         if operation not in {
             "list",
             "profile",

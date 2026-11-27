@@ -178,10 +178,18 @@ def canonical_draft(catalog, tenant, role_id, object_id, payload):
     if policy is None:
         return rules
     policy = {k: v for k, v in policy.items() if v is not None}
-    policy.update({p: sorted(policy[p]) for p in ("read", "query")})
+    policy.update(
+        {
+            p: sorted(policy[p])
+            for p in ("read", "query", "create", "update")
+            if p in policy
+        }
+    )
     if "sensitive" in policy:
         policy["sensitive"] = {
-            p: sorted(names) for p, names in policy["sensitive"].items()
+            p: sorted(names)
+            for p, names in policy["sensitive"].items()
+            if names is not None
         }
     document = {"list_policy": policy, "rules": rules}
     load_policy_rules(
@@ -245,33 +253,47 @@ async def user_list_editor(
     db, tx, tenant, catalog, role_id, rules, list_policy, head, objects
 ):
     object_id = "system.user"
-    menu_ids = tuple(
-        await db.scalars(
-            select(Menu.menu_id)
+    codes = {
+        "read": "system:user:list",
+        "query": "system:user:list",
+        "create": "system:user:add",
+        "update": "system:user:edit",
+    }
+    menus = (
+        await db.execute(
+            select(Menu.menu_id, Menu.permission)
             .where(
                 Menu.tenant_id == tenant.tenant_id,
-                Menu.permission == "system:user:list",
+                Menu.permission.in_(set(codes.values())),
             )
             .order_by(Menu.menu_id)
         )
-    )
-    granted = bool(
-        await db.scalar(
-            select(Role.role_id).where(
-                Role.tenant_id == tenant.tenant_id,
-                Role.role_id == role_id,
-                Role.status == "1",
-                (Role.role_code == "R_SUPER")
-                | select(role_menus.c.role_id)
-                .where(
-                    role_menus.c.tenant_id == tenant.tenant_id,
-                    role_menus.c.role_id == role_id,
-                    role_menus.c.menu_id.in_(menu_ids),
-                )
-                .exists(),
+    ).all()
+    action_menus = {
+        key: [str(mid) for mid, code in menus if code == permission]
+        for key, permission in codes.items()
+    }
+    role = (
+        await db.execute(
+            select(Role.role_code, Role.status).where(
+                Role.tenant_id == tenant.tenant_id, Role.role_id == role_id
+            )
+        )
+    ).one()
+    assigned = set(
+        await db.scalars(
+            select(role_menus.c.menu_id).where(
+                role_menus.c.tenant_id == tenant.tenant_id,
+                role_menus.c.role_id == role_id,
+                role_menus.c.menu_id.in_([mid for mid, _ in menus]),
             )
         )
     )
+    allowed = {
+        purpose: role.status == "1"
+        and (role.role_code == "R_SUPER" or any(int(mid) in assigned for mid in ids))
+        for purpose, ids in action_menus.items()
+    }
     active = None
     if (
         head["active_manifest_id"] is not None
@@ -289,18 +311,24 @@ async def user_list_editor(
                     role_ids=(str(role_id),),
                     list_defaults=True,
                 )
-                if granted
+                if any(allowed.values())
                 else ()
             )
         except BusinessException as exc:
             if exc.error_code != "FIELD_POLICY_UNAVAILABLE":
                 raise
             # A missing active proof disables copy; repair can still edit the candidate.
+    details = editor_defaults(rules, active, tenant.tenant_id, role_id)
+    if details["copy_fields"] is not None:
+        for purpose, granted in allowed.items():
+            if not granted:
+                details["copy_fields"][purpose] = []
     return {
         "list_policy": list_policy,
-        "list_menu_ids": [str(i) for i in menu_ids],
-        "list_action_granted": granted,
-        **editor_defaults(rules, active, tenant.tenant_id, role_id),
+        "list_menu_ids": action_menus["read"],
+        "action_menu_ids": action_menus,
+        "list_action_granted": allowed["read"],
+        **details,
     }
 
 
@@ -501,7 +529,11 @@ async def prepare_management(
     if (
         operation in {"preview", "publish"}
         and list_policy
-        and not isinstance(payload["rules"], dict)
+        and (
+            not isinstance(payload["rules"], dict)
+            or not (list_policy.keys() & {"create", "update"})
+            <= payload["rules"]["list_policy"].keys()
+        )
     ):
         raise BusinessException(
             409, "请重新加载角色字段配置", error_code="FIELD_POLICY_PROTOCOL_REQUIRED"

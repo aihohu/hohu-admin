@@ -54,6 +54,8 @@ class ManifestDraft(Closed):
 class FieldSelections(Closed):
     read: list[str] = Field(max_length=32)
     query: list[str] = Field(max_length=32)
+    create: list[str] | None = Field(default=None, max_length=32)
+    update: list[str] | None = Field(default=None, max_length=32)
 
 
 class ListPolicy(FieldSelections):
