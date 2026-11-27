@@ -1,10 +1,13 @@
 """Multi-object, multi-tenant immutable reuse with real sealed manifests."""
 
+import asyncio
+import json
+import sys
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import insert, update
+from sqlalchemy import insert, text, update
 
 from app.core.authorization_plan import LockMode, TenantLock
 from app.core.config import settings
@@ -37,6 +40,93 @@ from tests.modules.system.test_relation_field_snapshot import (  # noqa: F401
 )
 
 generic_sessions = _generic_sessions
+
+
+async def test_workers_recheck_revocation_and_recovery(relation_policies):
+    _, plain, catalog = relation_policies
+    async with plain() as db:
+        schema = await db.scalar(text("select current_schema()"))
+    workers = []
+
+    async def start():
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "tests.modules.system.snapshot_worker",
+            schema,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+        )
+        workers.append(process)
+        return process
+
+    async def read(process, tenant=0):
+        process.stdin.write(f"{tenant}\n".encode())
+        await process.stdin.drain()
+        return json.loads(await asyncio.wait_for(process.stdout.readline(), 45))
+
+    try:
+        for _ in range(2):
+            worker = await start()
+            assert await read(worker) == [["role_name"], 1]
+            assert await read(worker) == [["role_name"], 0]
+        await run(
+            relation_policies,
+            publish(version=6) | {"object_id": "system.role", "binding_version": 1},
+        )
+        built = await run(relation_policies, command("build", 7))
+        proof = Qualification(
+            "b" * 40,
+            catalog.digest,
+            *catalog_parts(catalog),
+            "c" * 64,
+            datetime.now(UTC) + timedelta(minutes=10),
+        )
+        ready = await run(
+            relation_policies,
+            command("ready", 8, expected_epoch=built["epoch"]),
+            qualification=proof,
+        )
+        await run(
+            relation_policies,
+            command("activate", 9, expected_epoch=ready["epoch"]),
+            qualification=proof,
+        )
+        for worker in workers:
+            assert await read(worker) == [[], 1]
+            assert await read(worker, 1) == [["role_name"], 1]
+        async with plain() as db:
+            await db.execute(
+                update(FieldPolicyObjectState)
+                .where(
+                    FieldPolicyObjectState.tenant_id == 0,
+                    FieldPolicyObjectState.object_id == "system.role",
+                )
+                .values(mode="frozen")
+            )
+            await db.commit()
+        for worker in workers:
+            assert await read(worker) == ["FIELD_POLICY_UNAVAILABLE", 0]
+            worker.stdin.close()
+            assert await asyncio.wait_for(worker.wait(), 30) == 0
+        async with plain() as db:
+            await db.execute(
+                update(FieldPolicyObjectState)
+                .where(
+                    FieldPolicyObjectState.tenant_id == 0,
+                    FieldPolicyObjectState.object_id == "system.role",
+                )
+                .values(mode="enforcing")
+            )
+            await db.commit()
+        assert await read(await start()) == [[], 1]
+    finally:
+        for worker in workers:
+            if worker.returncode is None:
+                worker.kill()
+            await worker.wait()
+
+
 plan_sessions = _plan_sessions
 
 

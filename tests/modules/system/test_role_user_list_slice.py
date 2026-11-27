@@ -135,11 +135,20 @@ async def verify_pages_and_cost(client, plain, monkeypatch, record_property):
         business = label in {"projection", "source"} or "pg_catalog.count" in stmt
         statements.append((label, stmt, not business))
 
+    # A just-activated version is cold. Measure the fixed page-size budget
+    # separately on requests that reuse that verified version.
+    engine = plain.kw["bind"].sync_engine
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        cold = await client.get("/user/list", params={"userName": "member", "size": 1})
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+    assert cold.status_code == 200
+    assert any("JOIN sys_field_policy_revision" in sql for _, sql, _ in statements)
     for size in (1, 10, 100):
         statements.clear()
         engine_calls.clear()
         start = perf_counter()
-        engine = plain.kw["bind"].sync_engine
         event.listen(engine, "before_cursor_execute", capture)
         try:
             response = await client.get(
@@ -148,6 +157,9 @@ async def verify_pages_and_cost(client, plain, monkeypatch, record_property):
         finally:
             event.remove(engine, "before_cursor_execute", capture)
         assert response.status_code == 200, response.text
+        assert not any(
+            "JOIN sys_field_policy_revision" in sql for _, sql, _ in statements
+        )
         assert not any(
             label is None and "sys_user" in stmt for label, stmt, _ in statements
         ), "list entry must not preload an actor outside the authorization barriers"

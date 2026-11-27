@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 from weakref import WeakKeyDictionary
 
-from sqlalchemy import Text, select, tuple_
+from sqlalchemy import Engine, Text, select, tuple_
 
 from app.core.authorization_plan import LockPlan, NewResource, ResourceKey
 from app.core.authorization_plan import ResourceKind as K
@@ -57,6 +57,7 @@ from app.modules.system.service.generic_field_policy_state import (
     read_manifest,
     transition,
 )
+from app.modules.system.service.list_snapshot_cache import SnapshotCache
 from app.modules.system.service.verified_policy_documents import documents_for
 
 READY_FIELDS = {
@@ -151,6 +152,7 @@ class GenericFieldPolicyService:
         # Keys are live authorization transactions, never sessions or actor IDs.
         # Values contain no ORM rows, transaction references or mutable admission.
         self._active_facts = WeakKeyDictionary()
+        self.list_snapshots = SnapshotCache()
 
     async def load_active(
         self, db, tx, *, tenant_id, catalog, object_id, role_ids, list_defaults=False
@@ -169,7 +171,16 @@ class GenericFieldPolicyService:
         return grants
 
     async def load_active_objects(
-        self, db, tx, *, tenant_id, catalog, object_ids, role_ids, list_defaults=False
+        self,
+        db,
+        tx,
+        *,
+        tenant_id,
+        catalog,
+        object_ids,
+        role_ids,
+        list_defaults=False,
+        reuse_list_snapshot=False,
     ):
         """Read one active manifest for all dependencies. Only a missing head returns None."""
         tx.assert_session(db)
@@ -203,8 +214,8 @@ class GenericFieldPolicyService:
                 head["active_manifest_id"],
                 head["active_manifest_digest"],
             )
-            cached = self._active_facts.get(tx)
-            if cached is None or cached[0] != cache_key:
+
+            async def load_verified():
                 await self._catalog(db, catalog)
                 _, items, grants = await read_manifest(
                     db,
@@ -230,10 +241,20 @@ class GenericFieldPolicyService:
                 bound = frozenset(
                     i["role_id"] for i in items if i["object_id"] == "system.user"
                 )
-                cached = (cache_key, tuple(grants), object_digests, bound)
-                # Keep only the latest tenant/manifest to bound retained payloads.
-                self._active_facts[tx] = cached
-            _, grants, object_digests, bound = cached
+                return tuple(grants), object_digests, bound
+
+            bind = db.get_bind() if reuse_list_snapshot else None
+            if isinstance(bind, Engine) and tx.holds_shared_read_barriers(tenant_id):
+                facts = await self.list_snapshots.get(
+                    (bind, bind.pool, *cache_key), load_verified
+                )
+            else:
+                cached = self._active_facts.get(tx)
+                if cached is None or cached[0] != cache_key:
+                    cached = (cache_key, await load_verified())
+                    self._active_facts[tx] = cached
+                facts = cached[1]
+            grants, object_digests, bound = facts
             expected = dict(object_digests)
             if any(
                 state["active_object_digest"] != expected[name]

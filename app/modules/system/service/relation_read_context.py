@@ -408,6 +408,7 @@ async def _build_context(
             object_ids=objects,
             role_ids=ids,
             list_defaults=action == "user.list-read",
+            reuse_list_snapshot=action == "user.list-read",
         )
         if grants is None:
             await require_legacy_field_policy(db)
