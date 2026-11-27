@@ -43,6 +43,8 @@ from app.modules.system.schemas.user import (
     UserQuery,
     UserRoleUpdate,
     UserUpdate,
+    UserWriteForm,
+    UserWriteFormOut,
 )
 from app.modules.system.schemas.user_projection import ProjectedUserOut
 from app.modules.system.schemas.user_transfer import (
@@ -57,6 +59,22 @@ from app.modules.system.schemas.user_transfer import (
 )
 
 router = APIRouter()
+
+
+@router.post(
+    "/write-form",
+    response_model=ResponseModel[UserWriteFormOut],
+    response_model_exclude_unset=True,
+    summary="获取本次用户新增或修改的字段能力",
+)
+async def user_write_form(
+    body: UserWriteForm,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return ResponseModel.success(
+        data=await user_read(db, current_user, operation="write-form", query=body)
+    )
 
 
 @router.get(

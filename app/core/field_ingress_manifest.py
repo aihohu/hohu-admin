@@ -1893,6 +1893,14 @@ INGRESS_BINDINGS = (
         "always",
     ),
     (
+        ("POST",),
+        "/system/user/write-form",
+        "APIRoute",
+        "app.modules.system.api.user.user_write_form",
+        "user",
+        "always",
+    ),
+    (
         ("GET",),
         "/system/user/profile",
         "APIRoute",

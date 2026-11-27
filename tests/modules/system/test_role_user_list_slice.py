@@ -250,6 +250,8 @@ async def verify_role_scopes(client, plain, tid, role, admin):
     new_role = await admin("/roles/2400/objects/system.user")
     assert new_role["listPolicy"] == {
         "mode": "restrict_selected",
+        "create": [],
+        "update": [],
         "read": [],
         "query": [],
     }
@@ -265,22 +267,7 @@ async def verify_role_scopes(client, plain, tid, role, admin):
     assert len(other) == 1 and "nickname" in other[0] and "userPhone" not in other[0]
 
 
-async def test_role_configuration_to_paginated_users(
-    tenant_id, parameters, parameter_http, monkeypatch, record_property
-):
-    client, plain = parameter_http
-    tid, role = tenant_id, 201 + tenant_id
-    catalog = production_catalog()
-    fresh = await client.get("/user/list")
-    assert fresh.status_code == 200, fresh.text
-    assert all(
-        "userName" in row and "userPhone" not in row and "userEmail" not in row
-        for row in fresh.json()["data"]["records"]
-    )
-    await activate_relations(parameters, monkeypatch, tenant_id=tid, catalog=catalog)
-    await activate_relations(
-        parameters, monkeypatch, tenant_id=1 - tid, catalog=catalog
-    )
+async def role_editor(client, plain, tid, role, catalog, monkeypatch):
     client._transport.app.include_router(
         create_management_router(), prefix="/system/field-policy"
     )
@@ -334,6 +321,28 @@ async def test_role_configuration_to_paginated_users(
                 | mutation(),
             )
 
+    return admin, activate_saved, mutation, base, obj, headers
+
+
+async def test_role_configuration_to_paginated_users(
+    tenant_id, parameters, parameter_http, monkeypatch, record_property
+):
+    client, plain = parameter_http
+    tid, role = tenant_id, 201 + tenant_id
+    catalog = production_catalog()
+    fresh = await client.get("/user/list")
+    assert fresh.status_code == 200, fresh.text
+    assert all(
+        "userName" in row and "userPhone" not in row and "userEmail" not in row
+        for row in fresh.json()["data"]["records"]
+    )
+    await activate_relations(parameters, monkeypatch, tenant_id=tid, catalog=catalog)
+    await activate_relations(
+        parameters, monkeypatch, tenant_id=1 - tid, catalog=catalog
+    )
+    admin, activate_saved, mutation, base, obj, headers = await role_editor(
+        client, plain, tid, role, catalog, monkeypatch
+    )
     document = await admin(obj)
     draft = {
         "catalogDigest": catalog.digest,
@@ -558,3 +567,145 @@ async def test_list_token_checks_live_status_and_versions(
     monkeypatch.setattr(service, "_is_blacklisted", deny)
     await refused(401, "TOKEN_EXPIRED")
     deny.assert_awaited_once()
+
+
+async def test_role_configuration_to_user_writes(
+    tenant_id, parameters, parameter_http, monkeypatch
+):
+    client, plain = parameter_http
+    tid, role = tenant_id, 201 + tenant_id
+    catalog = production_catalog()
+    await activate_relations(parameters, monkeypatch, tenant_id=tid, catalog=catalog)
+    admin, activate, mutation, _, obj, _ = await role_editor(
+        client, plain, tid, role, catalog, monkeypatch
+    )
+    async with plain() as db:
+        await db.execute(
+            insert(Role).values(
+                tenant_id=tid,
+                role_id=31000 + tid,
+                role_name="Default",
+                role_code="R_USER",
+                status="1",
+                data_scope="5",
+            )
+        )
+        for idx, code in enumerate(("system:user:add", "system:user:edit")):
+            mid = await db.scalar(
+                select(Menu.menu_id).where(
+                    Menu.tenant_id == tid, Menu.permission == code
+                )
+            )
+            if mid is None:
+                mid = 32000 + 10 * tid + idx
+                await db.execute(
+                    insert(Menu).values(
+                        tenant_id=tid,
+                        menu_id=mid,
+                        menu_name=code,
+                        menu_type="F",
+                        permission=code,
+                        status="1",
+                    )
+                )
+            if not await db.scalar(
+                select(role_menus.c.menu_id).where(
+                    role_menus.c.role_id == role, role_menus.c.menu_id == mid
+                )
+            ):
+                await db.execute(
+                    insert(role_menus).values(tenant_id=tid, role_id=role, menu_id=mid)
+                )
+        await db.commit()
+
+    policy = {
+        "mode": "allow_selected",
+        "read": ["nickname", "user_name"],
+        "query": ["user_name"],
+        "create": ["password", "status", "user_name"],
+        "update": ["nickname", "user_gender"],
+    }
+
+    async def save(policy):
+        doc = await admin(obj)
+        owned = [(r["fieldId"], r["access"]) for r in doc["listAccesses"]]
+        draft = {
+            "catalogDigest": doc["catalogDigest"],
+            "expectedVersion": doc["headVersion"],
+            "expectedBindingVersion": doc["bindingVersion"],
+            "listPolicy": policy,
+            "rules": [
+                r for r in doc["rules"] if (r["fieldId"], r["access"]) not in owned
+            ],
+        }
+        preview = await admin(obj + "/preview", draft)
+        await admin(
+            obj + "/revisions",
+            draft | mutation() | {"previewDigest": preview["previewDigest"]},
+        )
+        assert (await admin(obj))["listPolicy"] == policy
+
+    await save(policy)
+    await activate()
+    form = await client.post("/user/write-form", json={})
+    assert form.status_code == 200, form.text
+    assert form.json()["data"]["canSubmit"]
+    assert set(form.json()["data"]["fields"]) == {"password", "status", "userName"}
+    create = {"userName": "slicewriter", "status": "1", "password": "TestWrite123"}
+    rejected = await client.post("/user/add", json=create | {"nickname": "injected"})
+    assert rejected.status_code == 403, rejected.text
+    created = await client.post("/user/add", json=create)
+    assert created.status_code == 200, created.text
+    async with plain() as db:
+        uid = await db.scalar(
+            select(User.user_id).where(
+                User.tenant_id == tid, User.user_name == "slicewriter"
+            )
+        )
+    assert uid
+    url = f"/user/{uid}"
+    form = await client.post("/user/write-form", json={"userId": str(uid)})
+    assert form.status_code == 200 and "nickname" in form.json()["data"]["fields"]
+    assert (await client.patch(url, json={"nickname": "permitted"})).status_code == 200
+    policy = {
+        "mode": "restrict_selected",
+        "read": [],
+        "query": [],
+        "create": [],
+        "update": ["nickname"],
+    }
+    await save(policy)
+    assert (
+        await client.patch(url, json={"nickname": "stillallowed"})
+    ).status_code == 200
+    await activate()
+    stale = await client.patch(url, json={"nickname": "forbidden", "userGender": "1"})
+    assert stale.status_code == 403, stale.text
+    form = (await client.post("/user/write-form", json={"userId": str(uid)})).json()[
+        "data"
+    ]
+    assert "nickname" not in form["fields"] and "userGender" in form["fields"]
+    async with plain() as db:
+        row = await db.get(User, uid)
+        assert (row.nickname, row.user_gender) == ("stillallowed", None)
+    assert (await client.patch(url, json={"userGender": "1"})).status_code == 200
+    foreign = await client.patch("/user/" + str(102 - tid), json={"userGender": "2"})
+    assert foreign.status_code in (403, 404), foreign.text
+    # A second role with tenant-wide scope but no edit action cannot expand
+    # the editor role's self-only range, even for a permitted field.
+    async with plain() as db:
+        await db.execute(
+            update(Role).where(Role.role_id == role).values(data_scope="5")
+        )
+        await db.execute(
+            update(Role).where(Role.role_id == 31000 + tid).values(data_scope="1")
+        )
+        await db.execute(
+            insert(user_roles).values(
+                tenant_id=tid, role_id=31000 + tid, user_id=101 + tid
+            )
+        )
+        await db.commit()
+    out_of_scope = await client.post("/user/write-form", json={"userId": str(uid)})
+    assert out_of_scope.status_code == 403
+    assert (await client.patch(url, json={"userGender": "2"})).status_code == 403

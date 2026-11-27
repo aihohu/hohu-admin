@@ -72,6 +72,30 @@ class UserInput(BaseModel):
         return value
 
 
+class UserWriteForm(UserInput):
+    user_id: str | None = Field(default=None, pattern=r"^[1-9][0-9]{0,18}$")
+    dept_ids: list[str] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def targets(self):
+        ids = _validate_snowflake_id_list(self.dept_ids)
+        if self.user_id is not None and ids:
+            raise ValueError("Department proposals are only accepted for creation")
+        if len(set(ids)) != len(ids) or any(
+            len(value) > 19 or int(value) >= 2**63
+            for value in [*ids, *([self.user_id] if self.user_id else [])]
+        ):
+            raise ValueError("Invalid target identity")
+        return self
+
+
+class UserWriteFormOut(UserInput):
+    fields: list[str]
+    can_submit: bool
+    assign_roles: bool | None = None
+    assign_departments: bool | None = None
+
+
 class UserBase(UserInput):
     """用户基础字段"""
 

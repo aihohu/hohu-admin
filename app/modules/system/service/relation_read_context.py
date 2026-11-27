@@ -452,6 +452,7 @@ async def _build_context(
                         for rid in ids
                         if rid not in super_roles
                         for g in selected_grants(tenant.tenant_id, rid, DEFAULT)
+                        if g.access.purpose in {"management.read", "management.query"}
                     )
     with authorization_read_phase(db, "scope"):
         scopes = (

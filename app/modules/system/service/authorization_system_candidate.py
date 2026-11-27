@@ -946,7 +946,7 @@ class SystemAuthorizationCandidate:
             )
         if operation == "user.create":
             values = payload.model_dump(
-                exclude={"password", "role_ids", "dept_ids"}
+                exclude_unset=True, exclude={"password", "role_ids", "dept_ids"}
             ) | {"hashed_password": password_hash}
             await tx.insert_reserved(_key(ResourceKind.USER, tid, new_id), values)
             await self._replace(

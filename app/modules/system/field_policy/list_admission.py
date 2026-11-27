@@ -1,4 +1,4 @@
-"""Evaluate the user-list action once per role before compiling its SQL scope."""
+"""Evaluate user management actions against tenant-bound role facts."""
 
 from collections import defaultdict
 from dataclasses import dataclass
@@ -18,7 +18,7 @@ class RoleFacts:
 
 @lru_cache(maxsize=1)
 def list_engine():
-    # This model contains only the reviewed action. User/tenant facts are
+    # This model contains only reviewed actions. User/tenant facts are
     # request arguments and never stored on the shared enforcer.
     model = casbin.Model()
     model.load_model_from_text("""
@@ -34,7 +34,29 @@ m = r.action == p.action && r.tenant == r.role.tenant && r.role.enabled && (r.ro
     engine = casbin.Enforcer(model)
     engine.enable_auto_save(False)
     engine.add_policy("system:user:list", "allow")
+    engine.add_policy("system:user:add", "allow")
+    engine.add_policy("system:user:edit", "allow")
     return engine
+
+
+def user_write_roles(roles, tenant_id, action):
+    permission = {"user.create": "system:user:add", "user.update": "system:user:edit"}[
+        action
+    ]
+    return tuple(
+        role
+        for role in roles
+        if list_engine().enforce(
+            tenant_id,
+            RoleFacts(
+                role.tenant_id,
+                role.status == "1",
+                role.role_code == "R_SUPER",
+                frozenset(menu.permission for menu in role.menus if menu.permission),
+            ),
+            permission,
+        )
+    )
 
 
 @lru_cache(maxsize=1)
