@@ -15,11 +15,14 @@ from app.core.field_policy.contracts import canonical, identity, require
 from app.core.field_policy.documents import (
     catalog_parts,
     digest,
-    load_rules,
 )
 from app.core.id_generator import next_id
 from app.core.tenant_scope import require_tenant_context
 from app.db.authorization_plan_session import AuthorizationPlanSession
+from app.modules.system.field_policy.user_list_policy import DEFAULT, selected_grants
+from app.modules.system.field_policy.user_list_policy import (
+    load_policy_rules as load_rules,
+)
 from app.modules.system.models.field_policy import (
     FieldCatalogObject as CatalogObject,
 )
@@ -149,10 +152,29 @@ class GenericFieldPolicyService:
         # Values contain no ORM rows, transaction references or mutable admission.
         self._active_facts = WeakKeyDictionary()
 
-    async def load_active(self, db, tx, *, tenant_id, catalog, object_id, role_ids):
-        """Explicit caller catalog and role set; unknown/preparing/frozen never fall back."""
+    async def load_active(
+        self, db, tx, *, tenant_id, catalog, object_id, role_ids, list_defaults=False
+    ):
+        grants = await self.load_active_objects(
+            db,
+            tx,
+            tenant_id=tenant_id,
+            catalog=catalog,
+            object_ids={object_id},
+            role_ids=role_ids,
+            list_defaults=list_defaults,
+        )
+        if grants is None:
+            raise failure()
+        return grants
+
+    async def load_active_objects(
+        self, db, tx, *, tenant_id, catalog, object_ids, role_ids, list_defaults=False
+    ):
+        """Read one active manifest for all dependencies. Only a missing head returns None."""
         tx.assert_session(db)
         tx.assert_barrier(tenant_id)
+        require(bool(object_ids))
         require(type(role_ids) is tuple and len(role_ids) <= 4096)
         for role_id in role_ids:
             identity(role_id)
@@ -160,15 +182,19 @@ class GenericFieldPolicyService:
         with bounded_authorization_reads(
             db, AuthorizationReadBudget(max_bytes=128 * 1024 * 1024)
         ):
-            head = await self._head(db, tenant_id)
+            head = await self._head(db, tenant_id, required=False)
+            if head is None:
+                return None
             objects = await self._objects(db, tenant_id, catalog)
-            state = next((r for r in objects if r["object_id"] == object_id), None)
+            states = {
+                r["object_id"]: r for r in objects if r["object_id"] in object_ids
+            }
             if (
                 head["catalog_digest"] != catalog.digest
                 or head["rollout_state"] == "preparing"
                 or head["active_manifest_id"] is None
-                or state is None
-                or state["mode"] != "enforcing"
+                or states.keys() != object_ids
+                or any(state["mode"] != "enforcing" for state in states.values())
             ):
                 raise failure()
             cache_key = (
@@ -201,20 +227,33 @@ class GenericFieldPolicyService:
                     )
                     for name in catalog.objects
                 )
-                cached = (cache_key, tuple(grants), object_digests)
+                bound = frozenset(
+                    i["role_id"] for i in items if i["object_id"] == "system.user"
+                )
+                cached = (cache_key, tuple(grants), object_digests, bound)
                 # Keep only the latest tenant/manifest to bound retained payloads.
                 self._active_facts[tx] = cached
-            _, grants, object_digests = cached
-            expected = dict(object_digests)[object_id]
-            if state["active_object_digest"] != expected:
+            _, grants, object_digests, bound = cached
+            expected = dict(object_digests)
+            if any(
+                state["active_object_digest"] != expected[name]
+                for name, state in states.items()
+            ):
                 raise failure()
-            return tuple(
+            defaults = ()
+            if list_defaults and "system.user" in states:
+                defaults = tuple(
+                    g
+                    for rid in sorted(selected_roles - bound)
+                    for g in selected_grants(tenant_id, rid, DEFAULT)
+                )
+            return defaults + tuple(
                 g
                 for g in grants
-                if g.role_id in selected_roles and g.ref.object_id == object_id
+                if g.role_id in selected_roles and g.ref.object_id in states
             )
 
-    async def _head(self, db, tenant_id):
+    async def _head(self, db, tenant_id, *, required=True):
         row = (
             (
                 await db.execute(
@@ -224,7 +263,7 @@ class GenericFieldPolicyService:
             .mappings()
             .one_or_none()
         )
-        if row is None:
+        if required and row is None:
             raise failure()
         return row
 

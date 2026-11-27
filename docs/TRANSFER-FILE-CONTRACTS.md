@@ -38,6 +38,6 @@ Web 沿用现有角色字段配置、文件页和用户传输弹窗。文件页�
 
 ## 迁移与恢复
 
-当前 Alembic head 为 `e020f3b00001`。迁移保留旧文件元数据和路径，以 `legacy-unknown` 为默认分类；数据库约束拒绝不完整或未知的新来源证明。受控安装接受本系列已知前置 head，未知或分叉 head 拒绝，不能通过 `stamp` 跳过迁移。
+当前 Alembic head 为 `e020ac100001`。文件来源迁移保留旧文件元数据和路径，以 `legacy-unknown` 为默认分类；数据库约束拒绝不完整或未知的新来源证明。受控安装接受本系列已知前置 head，未知或分叉 head 拒绝，不能通过 `stamp` 跳过迁移。
 
 存在新来源文件或通用策略曾经 enforcing 时，降级拒绝丢弃来源列。恢复必须使用一致的数据库与文件备份，并匹配 Backend/Web、迁移和目录版本；不能只降级数据库或只回退 Web。直接启动合并模式、API/独立 scheduler 模式及现有 Docker Compose 均沿用[维护证据协议](AUTHORIZATION-MAINTENANCE.md)，完整停写和在途核验不能由 Ctrl+C 代替。

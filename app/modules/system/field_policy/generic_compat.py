@@ -28,6 +28,8 @@ _PURPOSES = {
 
 
 def legacy_accesses(operation: str, purpose: str) -> tuple[Access, ...]:
+    if purpose not in _PURPOSES.get(operation, ()):
+        return ()
     if operation in {"exact", "contains", "eq", "group", "distinct"}:
         if purpose == "import":
             return (Access(operation, purpose, "match"),)

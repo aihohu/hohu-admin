@@ -18,6 +18,7 @@ from app.core.field_policy.contracts import require
 from app.modules.system.field_policy.control_catalog import control_catalog
 from app.modules.system.field_policy.evaluator import FieldGrant
 from app.modules.system.field_policy.generic_compat import legacy_accesses
+from app.modules.system.field_policy.ordinary_catalog import production_catalog
 from app.modules.system.field_policy.user_fields import USER_FIELDS
 
 READ = Access("read", "management.read")
@@ -218,8 +219,7 @@ def transfer_user_grants(tenant_id, grants):
     every corresponding generic use allows it; a deny on either use is retained.
     The caller obtains grants from the verified snapshot under its G/B barrier.
     """
-    catalog = transfer_catalog()
-    compile_rules(catalog, grants)
+    compile_rules(production_catalog(), grants)
     require(all(g.tenant_id == tenant_id for g in grants))
     groups = defaultdict(dict)
     for grant in grants:

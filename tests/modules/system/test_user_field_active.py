@@ -255,6 +255,9 @@ async def test_multi_role_deny_wins_without_borrowing_other_role_scope(
             insert(user_roles).values(tenant_id=0, user_id=101, role_id=301)
         )
         await db.execute(
+            insert(role_menus).values(tenant_id=0, role_id=301, menu_id=3001)
+        )
+        await db.execute(
             insert(User).values(
                 tenant_id=0,
                 user_id=501,

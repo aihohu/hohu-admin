@@ -4,7 +4,10 @@ import pytest
 from sqlalchemy import select
 
 from app.modules.system.field_policy.control_catalog import control_catalog
-from app.modules.system.field_policy.delivery_catalog import delivery_catalog
+from app.modules.system.field_policy.delivery_catalog import (
+    delivery_catalog,
+    previous_delivery_catalog,
+)
 from app.modules.system.field_policy.ordinary_catalog import production_catalog
 from app.modules.system.field_policy.transfer_catalog import transfer_catalog
 from app.modules.system.models.field_policy import (
@@ -28,7 +31,9 @@ def test_current_preparation_catalog_is_the_complete_delivery_catalog():
 
 
 @pytest.mark.parametrize(
-    "source", [control_catalog, transfer_catalog], ids=["ten", "fourteen"]
+    "source",
+    [control_catalog, transfer_catalog, previous_delivery_catalog],
+    ids=["ten", "fourteen", "twenty-three"],
 )
 async def test_historical_to_current_upgrade_has_empty_new_bindings_and_safe_replay(
     system_sessions,
@@ -55,7 +60,10 @@ async def test_historical_to_current_upgrade_has_empty_new_bindings_and_safe_rep
             (tid, object_id) for tid in (0, 1) for object_id in current.objects
         }
         new = set(current.objects) - set(old.objects)
-        assert new
+        if source is previous_delivery_catalog:
+            assert not new and old.digest != current.digest
+        else:
+            assert new
         assert all(
             s.mode == "legacy" and not s.ever_enforced
             for s in states

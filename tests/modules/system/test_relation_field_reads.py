@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import delete, event, insert, select, update
 
 from app.core.exceptions import BusinessException
 from app.core.field_policy import Access, FieldRef, Grant, RecordContext, compile_rules
@@ -274,6 +274,51 @@ async def test_generic_user_relations_keep_null_slots(
     assert row["roleNameKeys"] == [None, None]
 
 
+async def test_relation_batches_select_only_authorized_user_ids(http_system):
+    _, plain = http_system
+    context = source_context()
+    context.scopes = {"201": None, "202": None}
+    context.rules = compile_rules(
+        context.catalog,
+        (
+            Grant(0, "201", FieldRef("system.user", "roles"), READ),
+            Grant(0, "202", FieldRef("system.user", "departments"), READ),
+        ),
+    )
+    entries = [
+        (context.record("system.user", uid, roles), {"user_id": uid}, {})
+        for uid, roles in (
+            (901, ()),
+            (902, ("201",)),
+            (903, ("202",)),
+            (904, ("201", "202")),
+        )
+    ]
+    batches = []
+
+    def capture(_conn, statement, _many, _params, _opts):
+        ids = next(
+            v for v in statement.compile().params.values() if isinstance(v, list)
+        )
+        batches.append((statement.get_final_froms()[0].name, ids))
+
+    async with plain() as db:
+        conn = (await db.connection()).sync_connection
+        event.listen(conn, "before_execute", capture)
+        try:
+            await relation_user_read.relation_sources(db, context, [])
+            assert batches == []
+            await relation_user_read.relation_sources(db, context, entries)
+        finally:
+            event.remove(conn, "before_execute", capture)
+    assert batches == [("sys_user_role", [902, 904]), ("sys_user_dept", [903, 904])]
+    for index, (_, values, _) in enumerate(entries):
+        assert values.get("roles") == ([] if index in {1, 3} else None)
+        assert values.get("dept_ids") == ([] if index in {2, 3} else None)
+        assert ("roles" in values) == (index in {1, 3})
+        assert ("dept_ids" in values) == (index in {2, 3})
+
+
 async def test_generic_profile_keeps_name_semantics(
     http_system, system_sessions, monkeypatch
 ):
@@ -464,6 +509,15 @@ async def test_user_filter_cannot_borrow_self_query_rights_for_other_rows(
         await db.execute(
             insert(user_roles).values(tenant_id=0, user_id=101, role_id=301)
         )
+        await allow_user_list(db)
+        list_menu = await db.scalar(
+            select(Menu.menu_id).where(
+                Menu.tenant_id == 0, Menu.permission == "system:user:list"
+            )
+        )
+        await db.execute(
+            insert(role_menus).values(tenant_id=0, role_id=301, menu_id=list_menu)
+        )
         await db.execute(
             insert(User).values(
                 tenant_id=0,
@@ -473,7 +527,6 @@ async def test_user_filter_cannot_borrow_self_query_rights_for_other_rows(
                 status="1",
             )
         )
-        await allow_user_list(db)
         await db.commit()
     await activate_relations(
         system_sessions,

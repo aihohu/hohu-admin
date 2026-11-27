@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import insert, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.core.config import settings
 from app.core.exceptions import BusinessException
@@ -61,6 +62,7 @@ async def activate_relations(
     extra_grants=(),
     catalog=None,
     publish_candidates=False,
+    tenant_id=0,
 ):
     """Prepare isolated consumer facts, then run the actual activation protocol.
 
@@ -73,7 +75,8 @@ async def activate_relations(
     async with plain() as db:
         action, adapter = catalog_parts(catalog)
         await db.execute(
-            insert(FieldCatalogSnapshot).values(
+            pg_insert(FieldCatalogSnapshot)
+            .values(
                 catalog_digest=catalog.digest,
                 schema_version=2,
                 catalog_revision="test/relations",
@@ -81,31 +84,46 @@ async def activate_relations(
                 adapter_digest=adapter,
                 canonical_document=catalog_document(catalog),
             )
+            .on_conflict_do_nothing(
+                index_elements=[FieldCatalogSnapshot.catalog_digest]
+            )
         )
         await db.execute(
-            insert(FieldPolicyHead).values(tenant_id=0, catalog_digest=catalog.digest)
+            insert(FieldPolicyHead).values(
+                tenant_id=tenant_id, catalog_digest=catalog.digest
+            )
         )
         for obj in catalog.objects.values():
             await db.execute(
-                insert(FieldCatalogObject).values(
+                pg_insert(FieldCatalogObject)
+                .values(
                     catalog_digest=catalog.digest,
                     object_id=obj.object_id,
                     domain_kind="tenant",
                     schema_digest=digest(primitive(obj)),
                     adapter_version=obj.scope_adapter,
                 )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        FieldCatalogObject.catalog_digest,
+                        FieldCatalogObject.object_id,
+                    ]
+                )
             )
             await db.execute(
                 insert(FieldPolicyObjectState).values(
-                    tenant_id=0, object_id=obj.object_id, catalog_digest=catalog.digest
+                    tenant_id=tenant_id,
+                    object_id=obj.object_id,
+                    catalog_digest=catalog.digest,
                 )
             )
         await db.commit()
     policies = factory, plain, catalog
+    primary_role = 201 + tenant_id
     candidates = []
     for object_id in catalog.objects:
         grants = tuple(
-            Grant(0, "201", ref, a)
+            Grant(tenant_id, str(primary_role), ref, a)
             for ref, field in catalog.fields.items()
             if ref.object_id == object_id
             for a in field.accesses
@@ -113,10 +131,14 @@ async def activate_relations(
         )
         candidates.append(
             (
-                201,
+                primary_role,
                 object_id,
                 rules_document(
-                    catalog, grants, tenant_id=0, role_id=201, object_id=object_id
+                    catalog,
+                    grants,
+                    tenant_id=tenant_id,
+                    role_id=primary_role,
+                    object_id=object_id,
                 ),
             )
         )
@@ -130,7 +152,7 @@ async def activate_relations(
                 rules_document(
                     catalog,
                     extra_grants,
-                    tenant_id=0,
+                    tenant_id=tenant_id,
                     role_id=role_id,
                     object_id=ref.object_id,
                 ),
@@ -149,10 +171,16 @@ async def activate_relations(
                     binding_version=0,
                     rules=rules,
                 ),
+                tenant_id=tenant_id,
             )
             version += 1
     else:
-        await _seed_candidates(plain, catalog, candidates)
+        await _seed_candidates(plain, catalog, candidates, tenant_id=tenant_id)
+    await activate_candidates(policies, version, tenant_id=tenant_id)
+
+
+async def activate_candidates(policies, version, *, tenant_id):
+    catalog = policies[2]
     proof = Qualification(
         "b" * 40,
         catalog.digest,
@@ -160,28 +188,34 @@ async def activate_relations(
         "c" * 64,
         datetime.now(UTC) + timedelta(minutes=20),
     )
-    built = await policy_command(policies, command("build", version))
+    built = await policy_command(
+        policies, command("build", version), tenant_id=tenant_id
+    )
     marked = await policy_command(
         policies,
         command("ready", version + 1, expected_epoch=built["epoch"]),
         qualification=proof,
+        tenant_id=tenant_id,
     )
     await policy_command(
         policies,
         command("activate", version + 2, expected_epoch=marked["epoch"]),
         qualification=proof,
+        tenant_id=tenant_id,
     )
 
 
-async def _seed_candidates(plain, catalog, candidates):
+async def _seed_candidates(plain, catalog, candidates, *, tenant_id):
     """Each consumer owns its schema; this is not a publication/audit receipt."""
     revisions, bindings = [], []
     for role_id, object_id, rules in candidates:
-        load_rules(catalog, rules, tenant_id=0, role_id=role_id, object_id=object_id)
+        load_rules(
+            catalog, rules, tenant_id=tenant_id, role_id=role_id, object_id=object_id
+        )
         revision_id = next_id()
         revisions.append(
             {
-                "tenant_id": 0,
+                "tenant_id": tenant_id,
                 "role_id": role_id,
                 "object_id": object_id,
                 "revision_id": revision_id,
@@ -189,12 +223,12 @@ async def _seed_candidates(plain, catalog, candidates):
                 "catalog_digest": catalog.digest,
                 "rules": rules,
                 "rules_digest": digest(rules),
-                "actor_user_id": 101,
+                "actor_user_id": 101 + tenant_id,
             }
         )
         bindings.append(
             {
-                "tenant_id": 0,
+                "tenant_id": tenant_id,
                 "role_id": role_id,
                 "object_id": object_id,
                 "revision_id": revision_id,

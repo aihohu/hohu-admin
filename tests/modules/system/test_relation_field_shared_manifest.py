@@ -4,10 +4,11 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import insert
+from sqlalchemy import insert, update
 
 from app.core.authorization_plan import LockMode, TenantLock
 from app.core.config import settings
+from app.core.exceptions import BusinessException
 from app.core.field_policy import Access, FieldRef, Grant
 from app.core.field_policy.contracts import primitive
 from app.core.field_policy.documents import (
@@ -175,6 +176,37 @@ async def test_shared_manifest_never_shares_object_or_role_results(
                 role_ids=("201",),
             )
             assert again[0].tenant_id == 0 and spy.await_count == 3
+        await db.rollback()
+
+
+@pytest.mark.parametrize(
+    "change", [{"mode": "frozen"}, {"active_object_digest": "f" * 64}]
+)
+async def test_batch_checks_every_requested_dependency(relation_policies, change):
+    factory, plain, catalog = relation_policies
+    async with plain() as db:
+        await db.execute(
+            update(FieldPolicyObjectState)
+            .where(
+                FieldPolicyObjectState.tenant_id == 0,
+                FieldPolicyObjectState.object_id == "system.dept",
+            )
+            .values(**change)
+        )
+        await db.commit()
+    service = module.generic_field_policy_service
+    async with factory() as db:
+        async with transactions.scope(db, tenants=(TenantLock(0),)) as tx:
+            args = {"tenant_id": 0, "catalog": catalog, "role_ids": ("201",)}
+            assert await service.load_active(db, tx, object_id="system.user", **args)
+            with pytest.raises(BusinessException) as exc:
+                await service.load_active_objects(
+                    db,
+                    tx,
+                    object_ids={"system.role", "system.user", "system.dept"},
+                    **args,
+                )
+            assert exc.value.error_code == "FIELD_POLICY_UNAVAILABLE"
         await db.rollback()
 
 

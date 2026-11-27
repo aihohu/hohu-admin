@@ -13,11 +13,18 @@ from app.core.field_policy.documents import (
     load_rules,
     rules_document,
 )
+from app.db.base import role_menus
 from app.modules.auth.permission_collect import collect_user_permission_codes
 from app.modules.system.field_policy.management_preview import (
     issue_preview,
     verify_preview,
 )
+from app.modules.system.field_policy.user_list_policy import (
+    DEFAULT,
+    editor_defaults,
+    load_policy_rules,
+)
+from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.user_field_policy import (
     UserFieldPolicyGlobalGuard,
@@ -159,13 +166,32 @@ def canonical_draft(catalog, tenant, role_id, object_id, payload):
         role_id=role_id,
         object_id=object_id,
     )
-    return rules_document(
+    rules = rules_document(
         catalog,
         grants,
         tenant_id=tenant.tenant_id,
         role_id=role_id,
         object_id=object_id,
     )
+
+    policy = payload.get("list_policy")
+    if policy is None:
+        return rules
+    policy = {k: v for k, v in policy.items() if v is not None}
+    policy.update({p: sorted(policy[p]) for p in ("read", "query")})
+    if "sensitive" in policy:
+        policy["sensitive"] = {
+            p: sorted(names) for p, names in policy["sensitive"].items()
+        }
+    document = {"list_policy": policy, "rules": rules}
+    load_policy_rules(
+        catalog,
+        document,
+        tenant_id=tenant.tenant_id,
+        role_id=role_id,
+        object_id=object_id,
+    )
+    return document
 
 
 def mutation_command(operation, payload, role_id, object_id):
@@ -213,6 +239,69 @@ def differences(before, after):
         if old.get(k) != new.get(k)
     ]
     return result[:20], len(result) > 20, len(result)
+
+
+async def user_list_editor(
+    db, tx, tenant, catalog, role_id, rules, list_policy, head, objects
+):
+    object_id = "system.user"
+    menu_ids = tuple(
+        await db.scalars(
+            select(Menu.menu_id)
+            .where(
+                Menu.tenant_id == tenant.tenant_id,
+                Menu.permission == "system:user:list",
+            )
+            .order_by(Menu.menu_id)
+        )
+    )
+    granted = bool(
+        await db.scalar(
+            select(Role.role_id).where(
+                Role.tenant_id == tenant.tenant_id,
+                Role.role_id == role_id,
+                Role.status == "1",
+                (Role.role_code == "R_SUPER")
+                | select(role_menus.c.role_id)
+                .where(
+                    role_menus.c.tenant_id == tenant.tenant_id,
+                    role_menus.c.role_id == role_id,
+                    role_menus.c.menu_id.in_(menu_ids),
+                )
+                .exists(),
+            )
+        )
+    )
+    active = None
+    if (
+        head["active_manifest_id"] is not None
+        and next(o for o in objects if o["object_id"] == object_id)["mode"]
+        == "enforcing"
+    ):
+        try:
+            active = (
+                await policies.load_active(
+                    db,
+                    tx,
+                    tenant_id=tenant.tenant_id,
+                    catalog=catalog,
+                    object_id=object_id,
+                    role_ids=(str(role_id),),
+                    list_defaults=True,
+                )
+                if granted
+                else ()
+            )
+        except BusinessException as exc:
+            if exc.error_code != "FIELD_POLICY_UNAVAILABLE":
+                raise
+            # A missing active proof disables copy; repair can still edit the candidate.
+    return {
+        "list_policy": list_policy,
+        "list_menu_ids": [str(i) for i in menu_ids],
+        "list_action_granted": granted,
+        **editor_defaults(rules, active, tenant.tenant_id, role_id),
+    }
 
 
 async def prepare_management(
@@ -404,7 +493,25 @@ async def prepare_management(
         None,
     )
     rules = binding["rules"] if binding and binding["archived_at"] is None else []
+    list_policy = rules.get("list_policy") if isinstance(rules, dict) else None
+    if object_id == "system.user" and (
+        not binding or binding["archived_at"] is not None
+    ):
+        list_policy = DEFAULT
+    if (
+        operation in {"preview", "publish"}
+        and list_policy
+        and not isinstance(payload["rules"], dict)
+    ):
+        raise BusinessException(
+            409, "请重新加载角色字段配置", error_code="FIELD_POLICY_PROTOCOL_REQUIRED"
+        )
     if operation == "object":
+        list_details = {}
+        if object_id == "system.user":
+            list_details = await user_list_editor(
+                db, tx, tenant, catalog, role_id, rules, list_policy, head, objects
+            )
         return wire(
             common
             | {
@@ -412,7 +519,8 @@ async def prepare_management(
                 "object_id": object_id,
                 "binding_version": binding["binding_version"] if binding else 0,
                 "revision_id": binding["revision_id"] if binding else None,
-                "rules": rules,
+                "rules": rules["rules"] if isinstance(rules, dict) else rules,
+                **list_details,
             }
         ), None
     items = policies._item_rows(bindings)
@@ -486,8 +594,27 @@ async def prepare_management(
         verify_preview(payload["preview_digest"], context)
         return None, command
     token, expiry = issue_preview(context)
+
+    def expanded(document):
+        if type(document) is list:
+            return document
+        grants = load_policy_rules(
+            catalog,
+            document,
+            tenant_id=tenant.tenant_id,
+            role_id=role_id,
+            object_id=object_id,
+        )
+        return rules_document(
+            catalog,
+            grants,
+            tenant_id=tenant.tenant_id,
+            role_id=role_id,
+            object_id=object_id,
+        )
+
     diff, truncated, count = (
-        differences(rules, payload["rules"])
+        differences(expanded(rules), expanded(payload["rules"]))
         if operation == "preview"
         else ([], False, len(items))
     )
@@ -498,6 +625,11 @@ async def prepare_management(
             "expires_at": datetime.fromtimestamp(expiry, UTC),
             "diff": diff,
             "change_count": count,
+            **(
+                {"list_mode": payload["rules"]["list_policy"]["mode"]}
+                if operation == "preview" and isinstance(payload["rules"], dict)
+                else {}
+            ),
             "sample_truncated": truncated,
             "safe_samples": [],
             "items": items if operation == "manifest-preview" else [],

@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 from app.core.config import settings
 from app.core.security import create_access_token
+from tests.scripts.console_install_client import current_policy_draft
 from tests.scripts.test_authorization_maintenance_database import (
     deployment_database as deployment_database,
 )
@@ -228,12 +229,7 @@ async def test_live_preparation_keeps_normal_admission_closed(
                 policy_path = f"/system/field-policy/roles/{rid}/objects/system.user"
                 document = (await client.get(policy_path, headers=local)).json()["data"]
                 assert document["headVersion"] == "4"
-                draft = {
-                    "expectedVersion": document["headVersion"],
-                    "expectedBindingVersion": document["bindingVersion"],
-                    "catalogDigest": document["catalogDigest"],
-                    "rules": document["rules"],
-                }
+                draft = current_policy_draft(document)
                 preview = await client.post(
                     policy_path + "/preview", headers=local, json=draft
                 )

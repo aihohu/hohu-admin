@@ -9,7 +9,9 @@ from app.core.field_policy.documents import (
     catalog_parts,
     digest,
     load_catalog,
-    load_rules,
+)
+from app.modules.system.field_policy.user_list_policy import (
+    load_policy_rules as load_rules,
 )
 
 

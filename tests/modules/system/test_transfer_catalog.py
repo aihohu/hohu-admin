@@ -133,6 +133,16 @@ def test_generic_user_rule_keeps_operation_purpose_and_level(access):
     )
 
 
+def test_user_list_sort_is_independent_of_export_authorization():
+    phone = FieldRef("system.user", "user_phone")
+    sorting = Grant(71, "201", phone, Access("sort", "management.query", "sort"))
+    exporting = Grant(71, "201", phone, Access("export", "export"))
+    assert transfer_user_grants(71, (sorting,)) == ()
+    assert transfer_user_grants(71, (sorting, exporting)) == transfer_user_grants(
+        71, (exporting,)
+    )
+
+
 def test_generic_bridge_does_not_broaden_eq_filter_into_join():
     ref = FieldRef("system.user", "departments")
     filtered = Grant(71, "201", ref, Access("eq", "management.query", "filter"))

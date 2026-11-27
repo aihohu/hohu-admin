@@ -210,20 +210,81 @@ async def resolve_data_scope_for_roles(
         accessible_dept_ids.update(dept_ids)
         include_self = include_self or not dept_ids
 
+    return _bounded_scope(
+        user.user_id, tenant.tenant_id, scope_kinds, accessible_dept_ids, include_self
+    )
+
+
+def _bounded_scope(user_id, tenant_id, scope_kinds, accessible_dept_ids, include_self):
     frozen_dept_ids = frozenset(accessible_dept_ids)
     return DataScopeResolution(
-        tenant_id=tenant.tenant_id,
+        tenant_id=tenant_id,
         scope_kinds=scope_kinds,
         accessible_dept_ids=frozen_dept_ids,
         accessible_user_scope=_build_user_scope(
-            user_id=int(user.user_id),
-            tenant_id=tenant.tenant_id,
+            user_id=int(user_id),
+            tenant_id=tenant_id,
             dept_ids=frozen_dept_ids,
             include_self=include_self,
         ),
         include_self=include_self,
         unbounded=False,
     )
+
+
+async def resolve_list_role_scopes(db, actor, roles, tenant):
+    """Materialize department sets once while retaining the scope of each role."""
+    if actor.tenant_id != tenant.tenant_id or any(
+        r.tenant_id != tenant.tenant_id for r in roles
+    ):
+        raise RuntimeError("data-scope resources cross tenant boundary")
+    kinds = {
+        r.role_id: DATA_SCOPE_ALL
+        if r.role_code == SUPER_ADMIN_ROLE_CODE
+        else r.data_scope
+        for r in roles
+    }
+    own = []
+    if {DATA_SCOPE_DEPT, DATA_SCOPE_DEPT_AND_SUB}.intersection(kinds.values()):
+        own = list(
+            await db.scalars(
+                select(user_depts.c.dept_id).where(
+                    user_depts.c.tenant_id == tenant.tenant_id,
+                    user_depts.c.user_id == actor.user_id,
+                )
+            )
+        )
+    subtree = (
+        await get_dept_and_sub_ids(db, own, tenant=tenant)
+        if DATA_SCOPE_DEPT_AND_SUB in kinds.values()
+        else []
+    )
+    custom = await _custom_dept_ids_by_role(
+        db,
+        {rid for rid, kind in kinds.items() if kind == DATA_SCOPE_CUSTOM},
+        tenant=tenant,
+    )
+    scopes = {}
+    for rid, kind in kinds.items():
+        if kind == DATA_SCOPE_ALL:
+            resolution = DataScopeResolution(
+                tenant.tenant_id, frozenset({kind}), None, None, True, True
+            )
+        else:
+            ids = {
+                DATA_SCOPE_DEPT: own,
+                DATA_SCOPE_DEPT_AND_SUB: subtree,
+                DATA_SCOPE_CUSTOM: custom.get(rid, ()),
+            }.get(kind, ())
+            resolution = _bounded_scope(
+                actor.user_id,
+                tenant.tenant_id,
+                frozenset({kind if kind in KNOWN_DATA_SCOPES else DATA_SCOPE_SELF}),
+                ids,
+                not ids,
+            )
+        scopes[str(rid)] = resolution
+    return scopes
 
 
 def get_user_filters_from_resolution(

@@ -12,10 +12,17 @@ from app.core.exceptions import (
 )
 from app.core.file_delivery import private_file_headers
 from app.core.tenant import TenantContext
-from app.db.authorization_http import relation_read, system_write, user_read
+from app.db.authorization_http import (
+    relation_read,
+    system_write,
+    user_list_read,
+    user_read,
+)
 from app.db.authorization_transfer_http import transfer_read_http
 from app.db.session import get_db
 from app.modules.auth.service import (
+    AccessClaims,
+    get_access_claims,
     get_current_tenant_context,
 )
 from app.modules.system.models.user import User
@@ -62,13 +69,11 @@ router = APIRouter()
         401: {"description": "未登录或令牌已过期"},
         403: {"description": "权限不足"},
     },
-    dependencies=[Depends(require_permissions("system:user:list"))],
 )
 async def get_user_list(
-    query: UserQuery = Depends(),
+    query: Annotated[UserQuery, Query()],
     db: AsyncSession = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
-    tenant: TenantContext = Depends(get_current_tenant_context),
+    claims: AccessClaims = Depends(get_access_claims),
 ):
     """
     获取用户分页列表
@@ -91,9 +96,7 @@ async def get_user_list(
         - user_gender: 用户性别（0-未知，1-男，2-女）
         - status: 用户状态（1-启用，2-禁用）
     """
-    data = await user_read(
-        db, _current_user, operation="list", query=query, tenant=tenant
-    )
+    data = await user_list_read(db, claims, query)
     return ResponseModel.success(data=data)
 
 

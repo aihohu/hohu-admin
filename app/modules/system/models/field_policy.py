@@ -229,7 +229,7 @@ class FieldPolicyRevision(_Created, Base):
             name="ck_gfp_revision_identity",
         ),
         CheckConstraint(
-            "CASE WHEN jsonb_typeof(rules) = 'array' THEN jsonb_array_length(rules) <= CASE WHEN object_id = 'system.user' THEN 512 ELSE 2048 END ELSE false END AND octet_length(rules::text) <= 524288",
+            "CASE WHEN jsonb_typeof(rules) = 'array' THEN jsonb_array_length(rules) <= CASE WHEN object_id = 'system.user' THEN 512 ELSE 2048 END WHEN object_id = 'system.user' AND jsonb_typeof(rules->'rules') = 'array' THEN jsonb_array_length(rules->'rules') <= 512 AND jsonb_typeof(rules->'list_policy') IS NOT DISTINCT FROM 'object' ELSE false END AND octet_length(rules::text) <= 524288",
             name="ck_gfp_revision_budget",
         ),
         CheckConstraint(
@@ -248,7 +248,7 @@ class FieldPolicyRevision(_Created, Base):
     revision_no: Mapped[int] = mapped_column(BigInteger)
     catalog_digest: Mapped[str] = mapped_column(CHAR(64))
     domain_kind: Mapped[str] = mapped_column(String(16), server_default="tenant")
-    rules: Mapped[list] = mapped_column(JSONB)
+    rules: Mapped[list | dict] = mapped_column(JSONB)
     rules_digest: Mapped[str] = mapped_column(CHAR(64))
     source_digest: Mapped[str | None] = mapped_column(CHAR(64))
     template_revision: Mapped[str | None] = mapped_column(String(64))

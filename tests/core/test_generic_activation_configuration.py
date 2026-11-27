@@ -18,7 +18,7 @@ def qualification_document(catalog, build="b" * 40):
     return {
         "schema_version": 2,
         "build_sha": build,
-        "database_revision": "e020f3b00001",
+        "database_revision": "e020ac100001",
         "catalog_digest": catalog.digest,
         "action_digest": action,
         "adapter_digest": adapter,

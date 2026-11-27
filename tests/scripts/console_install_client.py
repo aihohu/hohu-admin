@@ -14,6 +14,18 @@ from tests.core.test_generic_activation_configuration import qualification_docum
 from tools.ops import controlled_install as install
 
 
+def current_policy_draft(document):
+    draft = {
+        "expectedVersion": document["headVersion"],
+        "expectedBindingVersion": document["bindingVersion"],
+        "catalogDigest": document["catalogDigest"],
+        "rules": document["rules"],
+    }
+    if document.get("listPolicy") is not None:
+        draft.update(listPolicy=document["listPolicy"], rules=document["listRemainder"])
+    return draft
+
+
 async def complete_install(args, monkeypatch):
     qualification = args.control_dir / "test-qualification.json"
     qualification.write_text(
@@ -93,12 +105,7 @@ async def complete_install(args, monkeypatch):
             roles = await call("GET", "/roles")
             target = "/roles/" + roles["records"][0]["roleId"] + "/objects/system.user"
             document = await call("GET", target)
-            draft = {
-                "expectedVersion": document["headVersion"],
-                "expectedBindingVersion": document["bindingVersion"],
-                "catalogDigest": document["catalogDigest"],
-                "rules": document["rules"],
-            }
+            draft = current_policy_draft(document)
             preview = await call("POST", target + "/preview", json=draft)
             await call(
                 "POST",
