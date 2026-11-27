@@ -15,7 +15,7 @@ from app.core.field_policy import (
 )
 from app.modules.system.field_policy.transfer_catalog import READ, transfer_catalog
 
-DELIVERY_CATALOG_REVISION = "system-fields/6-delivery"
+DELIVERY_CATALOG_REVISION = "system-fields/8-publication"
 CREATE = Access("create", "management.create")
 UPDATE = Access("update", "management.update")
 EQ = Access("eq", "management.query", "filter")
@@ -102,7 +102,8 @@ def _object(obj, anchor, scope, fields, *, anchor_type="id"):
 
 
 @lru_cache(maxsize=1)
-def delivery_catalog():
+def previous_delivery_catalog():
+    """Immutable 23-object preparation source before user-list sorting."""
     base = transfer_catalog()
     user_name = (FieldRef("system.user", "user_name"),)
     extensions = {
@@ -327,3 +328,38 @@ def delivery_catalog():
     for tool, selected in TOOL_OBJECTS.items():
         add("ai.tool." + tool, selected, "ai:chat:use")
     return Catalog(objects, tuple(actions))
+
+
+@lru_cache(maxsize=1)
+def user_list_catalog():
+    base = previous_delivery_catalog()
+    objects, actions = dict(base.objects), dict(base.actions)
+    ref = FieldRef("system.user", "user_phone")
+    user = objects[ref.object_id]
+    objects[ref.object_id] = replace(
+        user,
+        fields=tuple(
+            replace(field, accesses=(*field.accesses, SORT))
+            if field.field_id == ref.field_id
+            else field
+            for field in user.fields
+        ),
+    )
+    action = actions["user.list-read"]
+    actions[action.action_id] = replace(
+        action, uses=(*action.uses, FieldUse(ref, SORT))
+    )
+    return Catalog(tuple(objects.values()), tuple(actions.values()))
+
+
+@lru_cache(maxsize=1)
+def delivery_catalog():
+    base = user_list_catalog()
+    actions = dict(base.actions)
+    publish = actions["config.publish"]
+    actions[publish.action_id] = replace(
+        publish,
+        uses=tuple(use for use in publish.uses if use.access == READ),
+        permission_codes=("system:config:publish",),
+    )
+    return Catalog(tuple(base.objects.values()), tuple(actions.values()))

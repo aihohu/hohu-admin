@@ -131,6 +131,13 @@ async def user_read(db, actor, *, operation, query=None, tenant=None):
     )
 
 
+async def user_list_read(db, claims, query):
+    await release_request_reads(db)
+    return await get_authorization_runtime().user_read(
+        list_claims=claims, operation="list", query=query
+    )
+
+
 async def relation_read(
     db, actor, *, operation, query=None, target_id=None, tenant=None
 ):

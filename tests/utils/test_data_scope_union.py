@@ -21,6 +21,7 @@ from app.modules.system.models.user import User
 from app.utils.data_scope import (
     get_user_data_scope_filters,
     resolve_data_scope,
+    resolve_list_role_scopes,
 )
 from tests.tenant_helpers import bind_test_user, tenant_context
 
@@ -196,6 +197,11 @@ async def test_dept_and_custom_roles_are_materialized_as_a_union(
     resolution = await resolve_data_scope(db_session, actor, tenant=TENANT)
     filters = await get_user_data_scope_filters(db_session, actor, tenant=TENANT)
     ai_context = await build_data_scope_context(db_session, actor)
+    enabled = [r for r in actor.roles if r.status == STATUS_ENABLED]
+    by_role = await resolve_list_role_scopes(db_session, actor, enabled, TENANT)
+    for role in enabled:
+        expected = own.dept_id if role.data_scope == DATA_SCOPE_DEPT else custom.dept_id
+        assert by_role[str(role.role_id)].accessible_dept_ids == {expected}
 
     assert resolution.scope_kinds == frozenset({DATA_SCOPE_DEPT, DATA_SCOPE_CUSTOM})
     assert resolution.accessible_dept_ids == frozenset({own.dept_id, custom.dept_id})

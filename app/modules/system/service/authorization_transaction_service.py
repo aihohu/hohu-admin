@@ -661,6 +661,13 @@ class _Transaction(GenericPolicyTransaction):
         if type(tenant_id) is not int or tenant_id not in self._tenants:
             raise _order_error()
 
+    def holds_shared_read_barriers(self, tenant_id):
+        self.assert_barrier(tenant_id)
+        return (
+            self._global_mode == LockMode.SHARED
+            and self._tenants[tenant_id] == LockMode.SHARED
+        )
+
     def assert_global_barriers(self):
         """Prove a fixed complete tenant set under G-X and every B-X."""
         self._check()

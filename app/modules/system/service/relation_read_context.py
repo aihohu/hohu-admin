@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import cached_property
 
 from sqlalchemy import and_, case, false, or_, select, true
 
@@ -26,12 +27,14 @@ from app.core.field_policy.contracts import (
 )
 from app.core.field_policy.sources import SourceRef
 from app.modules.auth.permission_collect import collect_user_buttons
+from app.modules.auth.service import AccessClaims
 from app.modules.system.field_policy.generic_compat import convert_legacy_grants
+from app.modules.system.field_policy.list_admission import FieldRoles
 from app.modules.system.field_policy.ordinary_catalog import (
     production_catalog as relation_catalog,
 )
 from app.modules.system.field_policy.relation_catalog import READ
-from app.modules.system.models.field_policy import FieldPolicyHead
+from app.modules.system.field_policy.user_list_policy import DEFAULT, selected_grants
 from app.modules.system.models.user_field_policy import UserFieldPolicyState
 from app.modules.system.service.authorization_read_budget import (
     authorization_read_phase,
@@ -48,9 +51,11 @@ from app.modules.system.service.generic_field_policy_service import (
 from app.modules.system.service.relation_capabilities import relation_write_permissions
 from app.modules.system.service.user_field_active import active_policy_grants
 from app.modules.system.service.user_field_context import load_current_user
+from app.modules.system.service.user_list_identity import load_list_identity
 from app.utils.data_scope import (
     get_user_filters_from_resolution,
     resolve_data_scope_for_roles,
+    resolve_list_role_scopes,
 )
 
 
@@ -78,6 +83,10 @@ class RelationReadContext:
     @property
     def catalog(self):
         return relation_catalog()
+
+    @cached_property
+    def list_fields(self):
+        return FieldRoles(self.tenant.tenant_id, self.rules.index.values())
 
     def scope_sql(self, obj, table):
         if obj in {"system.role", "system.menu"}:
@@ -111,12 +120,16 @@ class RelationReadContext:
             return true()
         if FieldUse(ref, access) not in self.catalog.actions[self.action].uses:
             return false()
-        allow, deny = [], []
-        for rid, scope in self.scope_sql(obj, table).items():
-            grant = self.rules.index.get((self.tenant.tenant_id, rid, ref, access))
-            if grant:
-                (allow if grant.effect == "allow" else deny).append(scope.is_(True))
-        result = and_(or_(false(), *allow), ~or_(false(), *deny))
+        scopes = self.scope_sql(obj, table)
+        if self.action == "user.list-read" and obj == "system.user":
+            result = self.list_fields.coverage(scopes, ref, access)
+        else:
+            allow, deny = [], []
+            for rid, scope in scopes.items():
+                grant = self.rules.index.get((self.tenant.tenant_id, rid, ref, access))
+                if grant:
+                    (allow if grant.effect == "allow" else deny).append(scope.is_(True))
+            result = and_(or_(false(), *allow), ~or_(false(), *deny))
         if access == READ:
             result = and_(
                 result,
@@ -132,9 +145,11 @@ class RelationReadContext:
         return resolve_fields(self.catalog, self.rules, record, self.action, access)
 
     @read_phase("proof", session_arg=1)
-    async def prove(self, db, obj, table, dependencies=(), *, readable=()):
+    async def prove(
+        self, db, obj, table, dependencies=(), *, readable=(), request_scope=()
+    ):
         scopes = self.scope_sql(obj, table)
-        base = self.base(obj, table)
+        base = and_(self.base(obj, table), *request_scope)
         if dependencies:
             counter = query_counterexample(
                 self.catalog,
@@ -318,6 +333,20 @@ async def load_relation_read_context(
 ):
     tx.assert_session(db)
     tx.assert_barrier(tenant.tenant_id)
+    if action == "user.list-read":
+        require(not write_form)
+        return await load_list_context(
+            db,
+            tx,
+            AccessClaims(
+                tenant.actor_user_id,
+                tenant.tenant_id,
+                tenant.tenant_version,
+                actor_user_version,
+            ),
+            tenant.tenant_code,
+            objects,
+        )
     with authorization_read_phase(db, "identity"):
         actor = await load_current_user(
             db, tenant=tenant, actor_user_version=actor_user_version
@@ -341,15 +370,47 @@ async def load_relation_read_context(
     )
     if not set(catalog.actions[action].permission_codes) <= functional:
         raise AuthorizationException("缺少操作权限", error_code="MISSING_PERMISSION")
-    ids = tuple(str(r.role_id) for r in roles)
-    with authorization_read_phase(db, "manifest"):
-        head = await db.scalar(
-            select(FieldPolicyHead.tenant_id).where(
-                FieldPolicyHead.tenant_id == tenant.tenant_id
-            )
+    return await _build_context(
+        db, tx, tenant, actor, roles, permissions, action, objects, catalog
+    )
+
+
+async def load_list_context(db, tx, claims, expected_tenant_code, objects):
+    catalog = relation_catalog()
+    with authorization_read_phase(db, "identity"):
+        tenant, actor, roles, permissions = await load_list_identity(
+            db, tx, claims, catalog, expected_tenant_code
         )
-        grants = ()
-        if head is None:
+    return await _build_context(
+        db,
+        tx,
+        tenant,
+        actor,
+        roles,
+        permissions,
+        "user.list-read",
+        objects,
+        catalog,
+    )
+
+
+async def _build_context(
+    db, tx, tenant, actor, roles, permissions, action, objects, catalog
+):
+    ids = tuple(str(r.role_id) for r in roles)
+    super_roles = {str(r.role_id) for r in roles if r.role_code == "R_SUPER"}
+    with authorization_read_phase(db, "manifest"):
+        grants = await generic_field_policy_service.load_active_objects(
+            db,
+            tx,
+            tenant_id=tenant.tenant_id,
+            catalog=catalog,
+            object_ids=objects,
+            role_ids=ids,
+            list_defaults=action == "user.list-read",
+            reuse_list_snapshot=action == "user.list-read",
+        )
+        if grants is None:
             await require_legacy_field_policy(db)
             state = (
                 await db.execute(
@@ -380,25 +441,29 @@ async def load_relation_read_context(
                         for ref, f in catalog.fields.items()
                         if ref.object_id == "system.user"
                         for a in f.accesses
+                        if action != "user.list-read"
+                        or a.purpose not in {"management.read", "management.query"}
+                        or rid in super_roles
                     )
                 )
-        else:
-            for obj in sorted(objects):
-                grants += await generic_field_policy_service.load_active(
-                    db,
-                    tx,
-                    tenant_id=tenant.tenant_id,
-                    catalog=catalog,
-                    object_id=obj,
-                    role_ids=ids,
-                )
+                if legacy is None and action == "user.list-read":
+                    grants += tuple(
+                        g
+                        for rid in ids
+                        if rid not in super_roles
+                        for g in selected_grants(tenant.tenant_id, rid, DEFAULT)
+                    )
     with authorization_read_phase(db, "scope"):
-        scopes = {
-            str(r.role_id): await resolve_data_scope_for_roles(
-                db, user=actor, roles=[r], tenant=tenant
-            )
-            for r in roles
-        }
+        scopes = (
+            await resolve_list_role_scopes(db, actor, roles, tenant)
+            if action == "user.list-read"
+            else {
+                str(r.role_id): await resolve_data_scope_for_roles(
+                    db, user=actor, roles=[r], tenant=tenant
+                )
+                for r in roles
+            }
+        )
     return RelationReadContext(
         tenant, actor, compile_rules(catalog, grants), scopes, permissions, action
     )

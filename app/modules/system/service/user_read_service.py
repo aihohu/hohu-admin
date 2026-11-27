@@ -10,13 +10,14 @@ from app.db.authorization_plan_session import _order_error
 from app.modules.auth.permission_collect import (
     collect_user_identity,
 )
+from app.modules.auth.service import AccessClaims
 from app.modules.system.field_policy.evaluator import FieldGrant
 from app.modules.system.field_policy.user_fields import USER_FIELDS
 from app.modules.system.schemas.login_log import LoginLogQuery
 from app.modules.system.schemas.operation_log import OperationLogQuery
 from app.modules.system.schemas.user import UserQuery
 from app.modules.system.schemas.user_projection import UserMemberQuery
-from app.modules.system.service.relation_user_read import read_users
+from app.modules.system.service.relation_user_read import read_list, read_users
 from app.modules.system.service.user_field_active import active_policy_grants
 from app.modules.system.service.user_field_context import (
     load_current_user,
@@ -113,8 +114,13 @@ class UserReadService:
             return await self.user_list(
                 db,
                 tx,
-                tenant=tenant,
-                actor_user_version=actor_user_version,
+                claims=AccessClaims(
+                    tenant.actor_user_id,
+                    tenant.tenant_id,
+                    tenant.tenant_version,
+                    actor_user_version,
+                ),
+                expected_tenant_code=tenant.tenant_code,
                 query=query,
             )
         if operation in {"operation-logs", "login-logs"}:
@@ -147,15 +153,16 @@ class UserReadService:
                 return collect_user_identity(actor)
             raise
 
-    async def user_list(self, db, tx, *, tenant, actor_user_version, query):
-        return await read_users(
-            db,
-            tx,
-            tenant=tenant,
-            actor_user_version=actor_user_version,
-            operation="list",
-            query=query,
-        )
+    async def user_list(self, db, tx, *, claims, query, expected_tenant_code=None):
+        tx.assert_session(db)
+        tx.assert_planning(claims.tenant_id)
+        if (
+            type(query) is not UserQuery
+            or type(claims.user_version) is not int
+            or claims.user_version < 1
+        ):
+            raise _order_error()
+        return await read_list(db, tx, claims, query, expected_tenant_code)
 
 
 user_read_service = UserReadService()

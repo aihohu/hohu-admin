@@ -64,3 +64,24 @@ def test_single_level_layout_and_view_component_is_not_pruned() -> None:
     )
 
     assert [item.name for item in build_menu_tree([route], 0)] == ["home"]
+
+
+def test_legacy_field_permission_group_keeps_the_role_route_reachable() -> None:
+    # 0.1.6 allowed a hidden directory solely to register permission buttons.
+    group = Menu(
+        menu_id=next_id(),
+        tenant_id=0,
+        menu_name="Field policy permissions",
+        menu_type="M",
+        hide_in_menu=True,
+        status="1",
+    )
+    role_page = _menu(
+        route_name="system_role",
+        parent_id=0,
+        menu_type="C",
+        component="view.system_role",
+    )
+    assert [item.name for item in build_menu_tree([role_page, group], 0)] == [
+        "system_role"
+    ]

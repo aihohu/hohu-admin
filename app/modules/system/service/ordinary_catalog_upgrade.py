@@ -15,7 +15,11 @@ from app.core.field_policy.contracts import canonical, require
 from app.core.field_policy.documents import digest
 from app.core.id_generator import next_id
 from app.modules.system.field_policy.control_catalog import control_catalog
-from app.modules.system.field_policy.delivery_catalog import DELIVERY_CATALOG_REVISION
+from app.modules.system.field_policy.delivery_catalog import (
+    DELIVERY_CATALOG_REVISION,
+    previous_delivery_catalog,
+    user_list_catalog,
+)
 from app.modules.system.field_policy.generic_compat import user_compat_object
 from app.modules.system.field_policy.ordinary_catalog import (
     ordinary_catalog,
@@ -169,6 +173,8 @@ async def _prepare_catalog(db, *, fence, source_build):
             relation_catalog(),
             control_catalog(),
             transfer_catalog(),
+            previous_delivery_catalog(),
+            user_list_catalog(),
             catalog,
         )
     }

@@ -509,12 +509,15 @@ def access_identity(user: User) -> AccessIdentity:
     return identity
 
 
-async def get_current_user(
-    token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)
-) -> User:
-    """
-    JWT Token 验证依赖项
-    """
+@dataclass(frozen=True, slots=True)
+class AccessClaims:
+    user_id: int
+    tenant_id: int
+    tenant_version: int
+    user_version: int
+
+
+async def get_access_claims(token: str = Depends(oauth2_scheme)) -> AccessClaims:
     try:
         # 0. 解码 Token，并在任何 Redis/DB 访问前应用 hosted runtime gate。
         payload = decode_access_token(token)
@@ -534,7 +537,16 @@ async def get_current_user(
             "Token 已失效，请重新登录", error_code="TOKEN_EXPIRED"
         )
 
-    # 2. 查询用户并预加载角色和菜单 (RBAC 核心)
+    return AccessClaims(user_id, tenant_id, tenant_version, user_version)
+
+
+async def get_current_user(
+    token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)
+) -> User:
+    claims = await get_access_claims(token)
+    user_id, tenant_id = claims.user_id, claims.tenant_id
+    tenant_version, user_version = claims.tenant_version, claims.user_version
+    # 查询用户并预加载角色和菜单 (RBAC 核心)
     # 使用 selectinload 解决异步环境下的关联查询
     result = await db.execute(
         select(User)
@@ -655,6 +667,9 @@ def build_menu_tree(menus: list[Menu], parent_id: int = None) -> list[UserRoute]
     current_level_menus.sort(key=lambda x: x.order or 0)
 
     for menu in current_level_menus:
+        # Permission-only groups from older installations have no navigable route.
+        if not menu.route_name or not menu.route_path:
+            continue
         children = build_menu_tree(menus, menu.menu_id)
         component = menu.component or ""
         is_layout_only_directory = (

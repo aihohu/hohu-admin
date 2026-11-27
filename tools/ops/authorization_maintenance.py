@@ -432,7 +432,7 @@ class PostgresStop:
             }
         raise _required()
 
-    async def prepare(self, processes=None):
+    async def prepare(self, processes=None, *, policy_required=False):
         if self.connection is None or self.original_allow is not True:
             raise _required()
         await self._warm_runtime()
@@ -450,6 +450,7 @@ class PostgresStop:
             application_roles=self.roles,
             processes=self._processes(processes) if processes is not None else None,
             original_restart_policies=policies,
+            **({"policy_prepare_required": True} if policy_required else {}),
         )
         await self._allow(False)
 
@@ -457,9 +458,9 @@ class PostgresStop:
         if next(self.directory.glob("process-*.json"), None) is not None:
             raise _required()
 
-    async def prepare_bootstrap(self):
+    async def prepare_bootstrap(self, *, policy_required=False):
         self._require_unregistered()
-        await self.prepare()
+        await self.prepare(policy_required=policy_required)
 
     async def bootstrap_fence(self):
         self._require_unregistered()

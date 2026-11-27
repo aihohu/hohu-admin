@@ -18,6 +18,7 @@ TYPES = {
     ".ico": "image/x-icon",
     ".woff2": "font/woff2",
 }
+NOTICES = {"licenses/LICENSE", "licenses/NOTICE", "licenses/THIRD_PARTY_NOTICES.md"}
 
 
 def bounded_file(path, budget):
@@ -38,15 +39,16 @@ class PreparationAssets:
         manifest = read_json(raw)
         if (
             set(manifest) != {"protocol", "version", "sourceCommit", "files"}
-            or manifest["protocol"] != "field-management/1"
+            or manifest["protocol"] != "field-management/2"
             or manifest["version"] != "0.2.0"
             or not re.fullmatch(r"[0-9a-f]{40}", expected_commit or "")
             or manifest["sourceCommit"] != expected_commit
             or type(manifest["files"]) is not dict
             or not 1 <= len(manifest["files"]) <= 4096
-            or "policy-prepare.html" not in manifest["files"]
         ):
             raise ValueError("Incompatible preparation Web bundle")
+        if "index.html" not in manifest["files"]:
+            raise ValueError("Missing console entry")
         self.files = {}
         total = 0
         for name, expected in manifest["files"].items():
@@ -55,8 +57,13 @@ class PreparationAssets:
                 not re.fullmatch(r"[A-Za-z0-9_./-]{1,240}", name)
                 or ".." in name.split("/")
                 or name.startswith("/")
+                or not (
+                    name in {"index.html", "favicon.ico"}
+                    or name.startswith("assets/")
+                    or name in NOTICES
+                )
                 or not path.resolve(strict=True).is_relative_to(root)
-                or path.suffix not in TYPES
+                or (path.suffix not in TYPES and name not in NOTICES)
                 or path.stat().st_size > 8 * 1024 * 1024
             ):
                 raise ValueError("Invalid preparation asset")
@@ -69,16 +76,31 @@ class PreparationAssets:
             ):
                 raise ValueError("Changed or oversized preparation asset")
             # Freeze verified bytes. A later filesystem mutation cannot change served content.
-            self.files[name] = (content, TYPES[path.suffix])
+            self.files[name] = (
+                content,
+                "text/plain" if name in NOTICES else TYPES[path.suffix],
+            )
         self.source_commit = expected_commit
         self.digest = hashlib.sha256(raw).hexdigest()
+        content, mime = self.files["index.html"]
+        if content.count(b"</head>") != 1 or b"hohu-admission" in content:
+            raise ValueError("Invalid console entry")
+        self.files["index.html"] = (
+            content.replace(
+                b"</head>",
+                b'<meta name="hohu-admission" content="field-management/2"></head>',
+            ),
+            mime,
+        )
 
     def read(self, name):
         return self.files[name]
 
     def mount(self, app):
         async def asset(request: Request):
-            name = request.url.path.lstrip("/") or "policy-prepare.html"
+            name = request.url.path.lstrip("/")
+            if name in {"", "login", "system/role"}:
+                name = "index.html"
             try:
                 content, mime = self.read(name)
             except KeyError:

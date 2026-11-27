@@ -17,6 +17,11 @@ from app.core.field_policy.documents import (
 )
 from app.core.id_generator import next_id
 from app.modules.system.field_policy import documents as legacy_documents
+from app.modules.system.field_policy.delivery_catalog import (
+    SORT,
+    delivery_catalog,
+    user_list_catalog,
+)
 from app.modules.system.field_policy.generic_compat import (
     convert_legacy_grants,
     user_compat_object,
@@ -165,12 +170,21 @@ async def migrate_legacy(db, *, fence, catalog, catalog_revision, source_build):
     user = catalog.objects.get("system.user")
     require(user is not None)
     original_ids = {field.field_id for field in base.fields}
-    # New virtual source cells cannot grant access. Original fields and every
-    # other User contract property must retain their exact legacy meaning.
+    originals = tuple(field for field in user.fields if field.field_id in original_ids)
+    if catalog.digest in {user_list_catalog().digest, delivery_catalog().digest}:
+        # List sorting exists in both reviewed catalog revisions. Legacy
+        # documents never gain a sorting grant through import or replay.
+        originals = tuple(
+            replace(field, accesses=tuple(a for a in field.accesses if a != SORT))
+            if field.field_id == "user_phone"
+            else field
+            for field in originals
+        )
+    # Virtual source cells cannot grant access. Other field properties and
+    # all legacy actions must match the historical contract exactly.
     require(
         replace(user, fields=base.fields) == base
-        and tuple(field for field in user.fields if field.field_id in original_ids)
-        == base.fields
+        and originals == base.fields
         and all(
             not field.accesses
             and not field.structural

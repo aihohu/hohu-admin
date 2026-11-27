@@ -51,7 +51,18 @@ class ManifestDraft(Closed):
         return value
 
 
+class FieldSelections(Closed):
+    read: list[str] = Field(max_length=32)
+    query: list[str] = Field(max_length=32)
+
+
+class ListPolicy(FieldSelections):
+    mode: Literal["restrict_selected", "allow_selected"]
+    sensitive: FieldSelections | None = None
+
+
 class ObjectDraft(ManifestDraft):
+    list_policy: ListPolicy | None = None
     expected_binding_version: Decimal
     rules: list[RuleInput] = Field(max_length=2048)
 

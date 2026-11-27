@@ -6,7 +6,7 @@
 
 `app.modules.system.field_policy.control_catalog.control_catalog()` 在七对象目录上增加 `system.config`、`system.setting` 和 `job.definition`，共十对象、144 字段。历史目录仍独立保留。设置字段采用稳定的实际 key，不接受通配符、camelCase 别名或统一的 `setting_value` 授权项。内部 AI 设置、固定安全设置、邮件和平台控制面不进入租户角色目录；`auth:default_password` 只允许更新，没有读取、查询或导出用途。
 
-字段许可仍须与动作功能权限相交，缺失许可即拒绝。普通配置修改没有 `is_public` 写许可；发布需独立的 `system:config:publish` 和编辑权限。普通任务修改仅覆盖名称、备注；调度、状态、运行分别使用专用动作，任务 key 创建后不可改。普通设置保存不能改账户安全、上传约束或默认密码；注册角色选择还需角色授权功能权限。候选动作声明不替代真实所有者的委派、安全上限或锁证明。
+字段许可仍须与动作功能权限相交，缺失许可即拒绝。普通配置修改没有 `is_public` 写许可；发布当前已保存值需独立的 `system:config:publish` 及对发布所用字段的明文读取权限。普通任务修改仅覆盖名称、备注；调度、状态、运行分别使用专用动作，任务 key 创建后不可改。普通设置保存不能改账户安全、上传约束或默认密码；注册角色选择还需角色授权功能权限。候选动作声明不替代真实所有者的委派、安全上限或锁证明。
 
 编辑读取应使用对应列表或设置分组的读取动作；专用写动作本身不额外授予表单读取。导入创建、导入精确匹配和导出分别声明用途，不从新增、修改或读取推导。`next_run_time` 不可独立授予；`project_next_run()` 仅在状态、触发类型、cron、间隔值及间隔单位全部可读时返回可信所有者计算的值与五项来源。任一来源拒绝时省略整个派生单元格，合法的空时间仍保持为空。
 
@@ -44,7 +44,7 @@ Config/Job 的 `fieldPolicy.controlActions` 是闭集按钮提示，含 `canImpo
 
 Settings values 的 key 保持原拼写，不递归 camelCase。保存只接受当前分组的 dirty 键，revision 绑定完整原事实及默认定义，采用数据库侧指纹与 HMAC，不向响应暴露秘密。注册角色选择器必须证明完整候选集合和角色名称来源；不完整时关闭选择器，保存另验注册资格与委派上界。默认密码不读取，空输入保持原值；秘密元数据也按命令能力过滤。
 
-Config 的 `PUT /system/config/{config_id}/publication` 接受 confirmed=true 与 expectedRevision，后者来自有完整发布权限及读取、修改足迹的表单 publicationRevision。`DELETE` 同路径只需 expectedRevision，使用表单独立的 revocationRevision，按 unpublish 锚点动作撤回，无需读取隐藏内容。两种证明绑定当前身份、G/B、目录、目标与登记，最长五分钟，不能互换。值、key、类型、状态或分类改变会在同一事务撤销旧登记；恢复旧值不会自动恢复公开资格。
+Config 的 `PUT /system/config/{config_id}/publication` 接受 confirmed=true 与 expectedRevision，后者来自当前角色在配置表单中取得的 publicationRevision。配置列表可读且有发布权限的角色可以打开已有记录，确认 ID、公开标志、键、值、类型和状态均获明文读取许可后取得凭据。发布接口只接受确认和修订号，内容变化后需重新确认。`DELETE` 同路径只需 expectedRevision，使用表单独立的 revocationRevision，按 unpublish 锚点动作撤回，无需读取隐藏内容。两种证明绑定当前身份、G/B、目录、目标与登记，最长五分钟，不能互换。值、key、类型、状态或分类改变会在同一事务撤销旧登记；恢复旧值不会自动恢复公开资格。
 
 公开自定义配置每次新鲜验证租户、分类、发布登记和精确摘要，不复用旧 public 缓存。历史 is_public=true 不构成新发布资格；历史未知分类值继续保存但不读取、导出或公开。只有显式合法完整替换才能按新协议分类，secret 不因改名降级。
 

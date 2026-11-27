@@ -12,14 +12,17 @@ from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from anyio import CancelScope
 from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from alembic import command
+from app.core.field_policy.console_origin import console_authority
 from app.utils.validators import validate_password
 from tools.ops import authorization_maintenance as ops
+from tools.ops.policy_preparation_assets import PreparationAssets
 
-REVISION = "e020f3b00001"
+REVISION = "e020ac100001"
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -76,6 +79,7 @@ async def migrate(guard, bootstrap):
                     ("e020f2b00001",),
                     ("e020f2c00001",),
                     ("e020f3a00001",),
+                    ("e020f3b00001",),
                     (REVISION,),
                 }:
                     raise ops._required()
@@ -152,31 +156,34 @@ async def prepare(
     processes,
     bootstrap,
     *,
-    policy_port=None,
-    policy_web_directory=None,
-    policy_web_commit=None,
+    policy_port=9527,
+    assets=None,
+    console_origin=None,
 ):
     if (guard.directory / "install.json").exists():
         raise ops._required()
     if bootstrap:
-        await guard.prepare_bootstrap()
+        await guard.prepare_bootstrap(policy_required=True)
         await guard.require_quiescent()
     else:
-        await guard.prepare(processes)
+        await guard.prepare(processes, policy_required=True)
         if type(processes) is ops.DirectProcesses:
             await ops.wait_registered_drain(guard.directory, processes)
         await processes.stop()
         if type(processes) is ops.DirectProcesses:
             ops.require_registered_inventory(guard.directory, processes)
         await guard.observe(processes)
-        if policy_port is not None:
-            from tools.ops.policy_preparation_identity import (  # noqa: PLC0415
-                require_preparation_administrators,
-            )
+        from tools.ops.policy_preparation_identity import (  # noqa: PLC0415
+            require_preparation_administrators,
+        )
 
+        try:
             await require_preparation_administrators(
                 async_sessionmaker(guard.runtime_engine, expire_on_commit=False)
             )
+        except ProgrammingError as error:
+            # A missing/incompatible source schema cannot establish identity.
+            raise ops._required() from error
     await migrate(guard, bootstrap)
     await guard.require_quiescent()
     async with asyncio.timeout(180):
@@ -190,18 +197,17 @@ async def prepare(
         else:
             await ops.execute_action(guard, processes, "seed.system", None)
     await guard.require_quiescent()
-    if policy_port is not None:
-        from tools.ops.policy_prepare import (  # noqa: PLC0415 - optional preparation listener
-            serve,
-        )
+    from tools.ops.policy_prepare import serve  # noqa: PLC0415
 
-        web = (
-            {"web_directory": policy_web_directory, "web_commit": policy_web_commit}
-            if policy_web_directory or policy_web_commit
-            else {}
-        )
-        await serve(guard, processes, bootstrap=bootstrap, port=policy_port, **web)
-        await guard.require_quiescent()
+    await serve(
+        guard,
+        processes,
+        bootstrap=bootstrap,
+        port=policy_port,
+        assets=assets,
+        console_origin=console_origin,
+    )
+    await guard.require_quiescent()
     write_receipt(guard, bootstrap)
     return {"state": "prepared-admission-closed", "revision": REVISION}
 
@@ -212,7 +218,11 @@ def arguments(argv=None):
     parser.add_argument("--inventory", type=Path, required=True)
     parser.add_argument("--control-dir", type=Path, required=True)
     parser.add_argument("--bootstrap", action="store_true")
-    parser.add_argument("--policy-port", type=int, default=8765)
+    parser.add_argument("--policy-port", type=int, default=9527)
+    parser.add_argument(
+        "--console-origin",
+        help="Existing administrator-facing origin, e.g. https://admin.example.org",
+    )
     parser.add_argument("--policy-web-directory", type=Path)
     parser.add_argument("--policy-web-commit")
     return parser.parse_args(argv)
@@ -236,9 +246,29 @@ async def run(args):
         raise ops._required()
     if type(processes) is ops.DirectProcesses:
         ops.require_registered_inventory(args.control_dir, processes)
+    origin = getattr(args, "console_origin", None)
+    if origin is not None:
+        console_authority(origin)
     password = os.environ.get("AUTHORIZATION_MAINTENANCE_PASSWORD")
     if args.command in {"prepare", "policy-prepare"} and password is not None:
         validate_password(password)
+    assets = None
+    if args.command in {"prepare", "policy-prepare"}:
+        if type(args.policy_port) is not int or not 1024 <= args.policy_port <= 65535:
+            raise ValueError("An unprivileged local controller port is required")
+        if (
+            args.command == "prepare"
+            or origin
+            or args.policy_web_directory
+            or args.policy_web_commit
+        ):
+            if not args.policy_web_directory or not args.policy_web_commit:
+                raise ValueError(
+                    "The normal Web bundle and its exact commit are required"
+                )
+            assets = PreparationAssets(
+                args.policy_web_directory, args.policy_web_commit
+            )
     engine = create_async_engine(url, poolclass=NullPool)
     try:
         async with ops.PostgresStop(engine, args.control_dir, manifest, roles) as guard:
@@ -247,11 +277,9 @@ async def run(args):
                     guard,
                     processes,
                     args.bootstrap,
-                    policy_port=args.policy_port
-                    if args.command == "policy-prepare"
-                    else None,
-                    policy_web_directory=getattr(args, "policy_web_directory", None),
-                    policy_web_commit=getattr(args, "policy_web_commit", None),
+                    policy_port=args.policy_port,
+                    assets=assets,
+                    console_origin=origin,
                 )
             require_receipt(guard, args.bootstrap)
             if args.bootstrap:

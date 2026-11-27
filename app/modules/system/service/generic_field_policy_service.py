@@ -6,21 +6,23 @@ from datetime import UTC, datetime
 from uuid import UUID
 from weakref import WeakKeyDictionary
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import Engine, Text, select, tuple_
 
 from app.core.authorization_plan import LockPlan, NewResource, ResourceKey
 from app.core.authorization_plan import ResourceKind as K
 from app.core.exceptions import BusinessException
-from app.core.field_policy.contracts import canonical, identity, primitive, require
+from app.core.field_policy.contracts import canonical, identity, require
 from app.core.field_policy.documents import (
     catalog_parts,
     digest,
-    load_catalog,
-    load_rules,
 )
 from app.core.id_generator import next_id
 from app.core.tenant_scope import require_tenant_context
 from app.db.authorization_plan_session import AuthorizationPlanSession
+from app.modules.system.field_policy.user_list_policy import DEFAULT, selected_grants
+from app.modules.system.field_policy.user_list_policy import (
+    load_policy_rules as load_rules,
+)
 from app.modules.system.models.field_policy import (
     FieldCatalogObject as CatalogObject,
 )
@@ -55,6 +57,8 @@ from app.modules.system.service.generic_field_policy_state import (
     read_manifest,
     transition,
 )
+from app.modules.system.service.list_snapshot_cache import SnapshotCache
+from app.modules.system.service.verified_policy_documents import documents_for
 
 READY_FIELDS = {
     "ready_manifest_digest": None,
@@ -148,11 +152,40 @@ class GenericFieldPolicyService:
         # Keys are live authorization transactions, never sessions or actor IDs.
         # Values contain no ORM rows, transaction references or mutable admission.
         self._active_facts = WeakKeyDictionary()
+        self.list_snapshots = SnapshotCache()
 
-    async def load_active(self, db, tx, *, tenant_id, catalog, object_id, role_ids):
-        """Explicit caller catalog and role set; unknown/preparing/frozen never fall back."""
+    async def load_active(
+        self, db, tx, *, tenant_id, catalog, object_id, role_ids, list_defaults=False
+    ):
+        grants = await self.load_active_objects(
+            db,
+            tx,
+            tenant_id=tenant_id,
+            catalog=catalog,
+            object_ids={object_id},
+            role_ids=role_ids,
+            list_defaults=list_defaults,
+        )
+        if grants is None:
+            raise failure()
+        return grants
+
+    async def load_active_objects(
+        self,
+        db,
+        tx,
+        *,
+        tenant_id,
+        catalog,
+        object_ids,
+        role_ids,
+        list_defaults=False,
+        reuse_list_snapshot=False,
+    ):
+        """Read one active manifest for all dependencies. Only a missing head returns None."""
         tx.assert_session(db)
         tx.assert_barrier(tenant_id)
+        require(bool(object_ids))
         require(type(role_ids) is tuple and len(role_ids) <= 4096)
         for role_id in role_ids:
             identity(role_id)
@@ -160,15 +193,19 @@ class GenericFieldPolicyService:
         with bounded_authorization_reads(
             db, AuthorizationReadBudget(max_bytes=128 * 1024 * 1024)
         ):
-            head = await self._head(db, tenant_id)
+            head = await self._head(db, tenant_id, required=False)
+            if head is None:
+                return None
             objects = await self._objects(db, tenant_id, catalog)
-            state = next((r for r in objects if r["object_id"] == object_id), None)
+            states = {
+                r["object_id"]: r for r in objects if r["object_id"] in object_ids
+            }
             if (
                 head["catalog_digest"] != catalog.digest
                 or head["rollout_state"] == "preparing"
                 or head["active_manifest_id"] is None
-                or state is None
-                or state["mode"] != "enforcing"
+                or states.keys() != object_ids
+                or any(state["mode"] != "enforcing" for state in states.values())
             ):
                 raise failure()
             cache_key = (
@@ -177,8 +214,8 @@ class GenericFieldPolicyService:
                 head["active_manifest_id"],
                 head["active_manifest_digest"],
             )
-            cached = self._active_facts.get(tx)
-            if cached is None or cached[0] != cache_key:
+
+            async def load_verified():
                 await self._catalog(db, catalog)
                 _, items, grants = await read_manifest(
                     db,
@@ -201,20 +238,43 @@ class GenericFieldPolicyService:
                     )
                     for name in catalog.objects
                 )
-                cached = (cache_key, tuple(grants), object_digests)
-                # Keep only the latest tenant/manifest to bound retained payloads.
-                self._active_facts[tx] = cached
-            _, grants, object_digests = cached
-            expected = dict(object_digests)[object_id]
-            if state["active_object_digest"] != expected:
+                bound = frozenset(
+                    i["role_id"] for i in items if i["object_id"] == "system.user"
+                )
+                return tuple(grants), object_digests, bound
+
+            bind = db.get_bind() if reuse_list_snapshot else None
+            if isinstance(bind, Engine) and tx.holds_shared_read_barriers(tenant_id):
+                facts = await self.list_snapshots.get(
+                    (bind, bind.pool, *cache_key), load_verified
+                )
+            else:
+                cached = self._active_facts.get(tx)
+                if cached is None or cached[0] != cache_key:
+                    cached = (cache_key, await load_verified())
+                    self._active_facts[tx] = cached
+                facts = cached[1]
+            grants, object_digests, bound = facts
+            expected = dict(object_digests)
+            if any(
+                state["active_object_digest"] != expected[name]
+                for name, state in states.items()
+            ):
                 raise failure()
-            return tuple(
+            defaults = ()
+            if list_defaults and "system.user" in states:
+                defaults = tuple(
+                    g
+                    for rid in sorted(selected_roles - bound)
+                    for g in selected_grants(tenant_id, rid, DEFAULT)
+                )
+            return defaults + tuple(
                 g
                 for g in grants
-                if g.role_id in selected_roles and g.ref.object_id == object_id
+                if g.role_id in selected_roles and g.ref.object_id in states
             )
 
-    async def _head(self, db, tenant_id):
+    async def _head(self, db, tenant_id, *, required=True):
         row = (
             (
                 await db.execute(
@@ -224,7 +284,7 @@ class GenericFieldPolicyService:
             .mappings()
             .one_or_none()
         )
-        if row is None:
+        if required and row is None:
             raise failure()
         return row
 
@@ -232,9 +292,11 @@ class GenericFieldPolicyService:
         row = (
             (
                 await db.execute(
-                    select(CatalogRow.__table__).where(
-                        CatalogRow.catalog_digest == catalog.digest
-                    )
+                    select(
+                        CatalogRow.canonical_document.cast(Text).label("document_text"),
+                        CatalogRow.action_catalog_digest,
+                        CatalogRow.adapter_digest,
+                    ).where(CatalogRow.catalog_digest == catalog.digest)
                 )
             )
             .mappings()
@@ -243,10 +305,8 @@ class GenericFieldPolicyService:
         if row is None:
             raise failure()
         try:
-            loaded = load_catalog(
-                row["canonical_document"], expected_digest=catalog.digest
-            )
-            if catalog_parts(loaded) != (
+            documents = documents_for(catalog)
+            if documents.catalog_parts(row["document_text"]) != (
                 row["action_catalog_digest"],
                 row["adapter_digest"],
             ):
@@ -267,12 +327,11 @@ class GenericFieldPolicyService:
         if {r["object_id"] for r in rows} != set(catalog.objects):
             raise failure()
         for item in rows:
-            obj = catalog.objects[item["object_id"]]
             if (
                 item["domain_kind"],
                 item["schema_digest"],
                 item["adapter_version"],
-            ) != (obj.domain_kind, digest(primitive(obj)), obj.scope_adapter):
+            ) != documents.objects[item["object_id"]]:
                 raise failure()
 
     async def _objects(self, db, tenant_id, catalog):

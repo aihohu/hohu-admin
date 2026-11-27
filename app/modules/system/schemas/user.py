@@ -1,5 +1,6 @@
 import re
 from datetime import datetime
+from typing import Literal
 
 from pydantic import (
     BaseModel,
@@ -355,8 +356,13 @@ class UserQuery(BaseModel):
     user_gender: str | None = Field(None, description="用户性别")
     status: str | None = Field(None, description="状态")
     role_code: str | None = Field(None, description="角色编码")
+    dept_id: int | None = Field(None, gt=0, le=2**63 - 1)
+    sort_by: Literal["userPhone"] | None = None
+    sort_order: Literal["asc", "desc"] | None = None
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(
+        extra="forbid", alias_generator=to_camel, populate_by_name=True
+    )
 
 
 class UserOut(BaseModel):

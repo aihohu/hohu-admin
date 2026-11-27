@@ -86,10 +86,15 @@ async def _stop_task(task):
 async def lifespan(_app: FastAPI):
     """Own all startup resources, including failures before the serving yield."""
     from app.core.field_ingress import validate_field_ingress  # noqa: PLC0415
+    from app.modules.system.service.generic_field_policy_service import (  # noqa: PLC0415
+        generic_field_policy_service,
+    )
 
     validate_field_ingress(_app, ai_enabled=_FIELD_INGRESS_AI_ENABLED)
     require_open()
     cleanup = AsyncExitStack()
+    generic_field_policy_service.list_snapshots.clear()
+    cleanup.callback(generic_field_policy_service.list_snapshots.clear)
     cleanup.push_async_callback(close_redis)
     process = ProcessAdmission(
         write_admission, role=settings.APP_ROLE, build_sha=settings.RELEASE_BUILD_SHA

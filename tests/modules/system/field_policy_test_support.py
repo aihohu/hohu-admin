@@ -40,6 +40,9 @@ def _install(connection, *, active=False) -> None:
             runpy.run_path(
                 str(_MIGRATION.with_name("e020f1200001_generic_field_policy.py"))
             )["upgrade"]()
+            runpy.run_path(
+                str(_MIGRATION.with_name("e020ac100001_user_list_policy.py"))
+            )["upgrade"]()
 
 
 @asynccontextmanager

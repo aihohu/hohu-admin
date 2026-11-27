@@ -2,7 +2,9 @@
 
 from app.core.authorization_plan import LockMode, TenantLock, TransactionBudget
 from app.db.authorization_owner import rollback_authorization_session
+from app.db.authorization_plan_session import _order_error
 from app.db.authorization_system_owner import require_candidate_session
+from app.modules.auth.service import AccessClaims
 from app.modules.system.service.authorization_read_budget import (
     AuthorizationReadBudget,
     bounded_authorization_reads,
@@ -14,8 +16,25 @@ from app.modules.system.service.user_read_service import user_read_service
 
 
 class UserReadOwner:
-    async def execute(self, db, *, tenant, actor_user_version, operation, query=None):
+    async def execute(
+        self,
+        db,
+        *,
+        tenant=None,
+        actor_user_version=None,
+        operation,
+        query=None,
+        list_claims=None,
+    ):
         require_candidate_session(db)
+        if list_claims is not None and (
+            type(list_claims) is not AccessClaims
+            or operation != "list"
+            or tenant is not None
+            or actor_user_version is not None
+        ):
+            raise _order_error()
+        tenant_id = tenant.tenant_id if list_claims is None else list_claims.tenant_id
         try:
             with bounded_authorization_reads(
                 db, AuthorizationReadBudget(max_statements=4096)
@@ -24,7 +43,7 @@ class UserReadOwner:
                     db,
                     tenants=(
                         TenantLock(
-                            tenant.tenant_id,
+                            tenant_id,
                             LockMode.EXCLUSIVE
                             if operation in {"operation-logs", "login-logs"}
                             else LockMode.SHARED,
@@ -32,6 +51,10 @@ class UserReadOwner:
                     ),
                     budget=TransactionBudget(timeout_ms=8000),
                 ) as tx:
+                    if list_claims is not None:
+                        return await user_read_service.user_list(
+                            db, tx, claims=list_claims, query=query
+                        )
                     result = await user_read_service.execute(
                         db,
                         tx,

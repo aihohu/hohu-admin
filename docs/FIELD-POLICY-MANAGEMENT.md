@@ -2,11 +2,19 @@
 
 Backend/Web 0.2.0 开发版本提供通用策略候选管理。Backend 当前准备目录为23对象，在原十四对象上增加九个AI、审计与日志交付对象；保存候选与封存租户清单可用，生产激活和正常恢复仍需完整资格。关系、配置、设置、任务及传输沿用现有Web页面；旧整对象表单由Backend拒写。这些能力不代表全系统字段权限或生产发布已经完成。契约见[通用字段策略存储](FIELD-POLICY-STORAGE.md)、[配置任务](CONTROL-FIELD-CONTRACTS.md)、[传输与文件](TRANSFER-FILE-CONTRACTS.md)和[AI与审计交付](AI-DELIVERY-FIELDS.md)。
 
+## 用户列表读取与查询
+
+普通角色获准查看用户后，可按其数据范围使用审核过的普通字段。「仅限制所选字段」按读取、查询用途登记例外，手机号、邮箱和关系字段可以单独授权。「仅允许所选字段」从空白选择，或从该角色的活动权限复制。列表中获准的手机号和邮箱继续脱敏。保存候选后，显式激活才会改变下一次列表请求。
+
+管理 API 的用户对象草稿支持 `listPolicy`，模式值为 `restrict_selected` 或 `allow_selected`，`read`、`query` 为字段标识数组。限制模式下可选的 `sensitive.read`、`sensitive.query` 指定单独开放的敏感字段。对象响应给出可选字段以及其余用途的规则，预览摘要绑定模式和全部选择。修改其余用途须保留当前列表模式。
+
+用户列表在同租户内按具备 `system:user:list` 的角色各自的数据范围取并集。范围内的显式拒绝优先。查询支持部门范围 `deptId`、手机号排序 `sortBy=userPhone` 及 `sortOrder=asc|desc`。筛选和排序需要覆盖整个请求范围的对应用途权限，失败返回 403。总数和分页应用相同行条件，禁止读取的业务键从记录中省略，获准的空值保留。
+
 ## 角色管理入口
 
-入口位于「系统管理 → 角色管理」的行操作，字段权限紧邻菜单权限右侧，两者采用相同按钮样式。管理者必须具有启用的 `R_SUPER` 和显式 `system:role:field-policy-view`，通配按钮权限不能代替专用权限。编辑候选和标记待激活另需 `system:role:field-policy-edit`；激活及冻结另需 `system:role:field-policy-activate`。每次请求重新检查当前身份、角色和功能码，按钮隐藏不是服务端鉴权。
+管理员从「系统管理 → 角色管理」的行操作「权限配置」进入当前角色的权限页面。管理者必须具有启用的 `R_SUPER` 和显式 `system:role:field-policy-view`，通配按钮权限不能代替专用权限。编辑候选和标记待激活另需 `system:role:field-policy-edit`；激活及冻结另需 `system:role:field-policy-activate`。每次请求重新检查当前身份、角色和功能码，按钮隐藏不是服务端鉴权。
 
-抽屉显示当前租户、角色、数据范围、对象和候选版本。菜单权限决定能否调用功能，数据范围决定可访问记录，字段规则决定对应用途下的字段许可；三者同时成立才允许业务操作。平台固定边界、结构字段和不支持的用途不能由角色规则扩大。自定义按钮不会自动取得字段许可，需要服务端注册的动作与字段用途映射。
+页面显示当前租户、角色、数据范围、对象和候选版本。菜单权限决定能否调用功能，数据范围决定可访问记录，字段规则决定对应用途下的字段许可；三者同时成立才允许业务操作。平台固定边界、结构字段和不支持的用途不能由角色规则扩大。自定义按钮不会自动取得字段许可，需要服务端注册的动作与字段用途映射。
 
 规则分为「读取与查询」「新增与修改」「导入与导出」。导入内部区分新增、修改和匹配；查询分别展示服务端支持的筛选、关联、分组等用途。未配置表示未授予；`deny` 是显式拒绝，清空配置不等同于允许。
 
@@ -44,7 +52,7 @@ Backend/Web 0.2.0 开发版本提供通用策略候选管理。Backend 当前准
 
 ## 激活与完整准备
 
-部署方设置 `FIELD_POLICY_QUALIFICATION_FILE`，提供受保护的 schema 2 验收资格（最大1MiB）。记录绑定当前40位 `RELEASE_BUILD_SHA`、迁移 `e020f3b00001`、目录/动作/适配器摘要、完整对象集合、十项验收证据和最长24小时有效期。旧用户单对象资格文件不能代替。文件在数据库锁外读取，锁内再次校验绑定与有效期；浏览器不能上传资格、路径或身份声明。缺失、过期或漂移时可以修复候选，不能 ready/activate。
+部署方设置 `FIELD_POLICY_QUALIFICATION_FILE`，提供受保护的 schema 2 验收资格（最大1MiB）。记录绑定当前40位 `RELEASE_BUILD_SHA`、迁移 `e020ac100001`、目录/动作/适配器摘要、完整对象集合、十项验收证据和最长24小时有效期。旧用户单对象资格文件不能代替。文件在数据库锁外读取，锁内再次校验绑定与有效期；浏览器不能上传资格、路径或身份声明。缺失、过期或漂移时可以修复候选，不能 ready/activate。
 
 ready/activate 使用闭集请求：`requestId`、`reason`、`expectedVersion`、`expectedEpoch`、`catalogDigest`、`candidateManifestDigest`。路径中的 `manifestId` 必须匹配当前候选，不能指向其他清单。服务端返回 `candidateManifestId`、`readyUntil`、`canReady`、`canActivate` 和稳定阻断码。两步分别确认本租户完整候选，ready最长15分钟，不能自动继续activate。修改候选、epoch或资格使原ready失效；同一事务更新全部对象与用户兼容镜像、审计、回执及epoch。新用途和未配置规则不自动获得许可。
 
@@ -64,25 +72,25 @@ ready/activate 使用闭集请求：`requestId`、`reason`、`expectedVersion`�
 
 ```bash
 pnpm install --frozen-lockfile
-pnpm build:policy --outDir /protected/policy-web
+pnpm build --outDir /protected/web-dist
 ```
 
-构建产生独立 `policy-prepare.html` 与 `policy-preparation.json`，后者包含协议、组件版本、源提交和构建文件SHA256。部署交接必须使用干净、已验收的源码提交及固定依赖，不能将有本地修改的构建声明为该提交的发布产物。运行时显式选择目录和完整 Web SHA：
+普通构建提供 `index.html` 与 `policy-preparation.json`。清单包含协议、组件版本、源码提交及构建文件 SHA256。交接时从干净的已验收源码及固定依赖构建，记录完整 Web SHA。
 
 ```bash
-python -m tools.ops.controlled_install policy-prepare \
+python -m tools.ops.controlled_install prepare \
   --inventory /protected/upgrade.json --control-dir /protected/control \
-  --policy-web-directory /protected/policy-web \
-  --policy-web-commit <40-character-web-sha> --policy-port 8765
+  --policy-web-directory /protected/web-dist \
+  --policy-web-commit <40-character-web-sha> --policy-port 9527
 ```
 
 新装另加 `--bootstrap`，其余配置遵循[受控安装](CONTROLLED-INSTALL.md)。目录和commit参数必须同时提供。控制器验证协议、0.2.0版本、源码SHA和每个文件摘要，只服务已验证的内存字节；未登记路径404，无普通业务路由fallback。清单≤256KiB、文件≤8MiB、合计≤64MiB，不提供任意文件读取。
 
-打开本机 `http://127.0.0.1:8765/`，输入租户代码、已有用户名和密码。升级前必须在每个已初始化或启用租户通过现有菜单/角色管理显式配置上述三个专用码，绑定给一个启用的 `R_SUPER` 管理身份；旧用户字段权限码不能代替。可先创建对应权限按钮再授权，升级种子按权限码复用，禁止直接改SQL授权。非新装在停写成立后、DDL前预检；新装在种子后预检。失败返回 `FIELD_POLICY_ADMIN_PREFLIGHT_REQUIRED`，不创建通用策略head或准备标记，且保持admission关闭，按维护恢复协议处理。
+保留管理员原有的后台地址。直接启动时将原 Web 端口交给控制器；部署已有 HTTPS 代理时使用 `--console-origin https://admin.example.org` 固定原地址，代理将整个后台临时指向控制器并保留准确的 Host。管理员在原登录页输入租户代码及已有账号，进入“系统管理 → 角色管理 → 字段权限”。恢复后将相同地址交回普通 Web/API。升级前必须在每个已初始化或启用租户通过现有菜单/角色管理显式配置上述三个专用码，绑定给一个启用的 `R_SUPER` 管理身份；旧用户字段权限码不能代替。可先创建对应权限按钮再授权，升级种子按权限码复用，禁止直接改SQL授权。非新装在停写成立后、DDL前预检；新装在种子后预检。失败返回 `FIELD_POLICY_ADMIN_PREFLIGHT_REQUIRED`，不创建通用策略head或准备标记，且保持admission关闭，按维护恢复协议处理。
 
-`POST /policy-prepare/login` 接受 `tenantCode`、`userName`、`password`，返回15分钟随机会话及tenant/actor字符串ID。密码校验在SQL事务和G/B锁之外；校验后重新检查当前身份和专用读取权限。不签发普通access/refresh token，服务端只存token摘要，客户端仅内存持有，不放URL/localStorage/sessionStorage。登录体≤8KiB，10次/分钟、最多16会话；同源与loopback Host校验阻断跨站请求和域名重绑定。登录沿用部署已有的租户登录模式及运行资格限制。
+`POST /policy-prepare/login` 接受 `tenantCode`、`userName`、`password`，返回15分钟随机会话及tenant/actor字符串ID。密码校验在SQL事务和G/B锁之外；校验后重新检查当前身份和专用读取权限。不签发普通access/refresh token，服务端只存token摘要，客户端仅内存持有，不放URL/localStorage/sessionStorage。登录体≤8KiB，10次/分钟、最多16会话；精确同源与已配置的 Host 校验阻断跨站请求和域名重绑定。登录沿用部署已有的租户登录模式及运行资格限制。
 
-`POST /policy-prepare/logout` 撤销会话；`POST /policy-prepare/finish` 在当前授权与停写核验后结束服务。证据失效、未决事务或致命错误销毁会话并禁止排队请求重新进入。旧 catalog/command 入口仍只使用已有管理JWT；该JWT不能调用新准备管理API。准备页面共用产品角色抽屉，其他菜单/角色业务操作保持禁用。
+`POST /policy-prepare/logout` 撤销会话；`POST /policy-prepare/finish` 在当前授权与停写核验后结束服务。证据失效、未决事务或致命错误销毁会话并禁止排队请求重新进入。旧 catalog/command 入口仍只使用已有管理JWT；该JWT不能调用新准备管理API。维护和正常运行均使用角色列表的同一个字段权限抽屉，其他菜单/角色业务操作保持禁用。
 
 准备控制器把最小登录/拒绝/结束事件写入受保护控制目录的 `policy-events.jsonl`，仅含时间、固定操作、稳定代码与已验证身份；单条≤1KiB、总≤8MiB，落盘失败会关闭会话。密码、令牌、草稿、原因和原异常文本不写入事件。候选成功的审计与回执仍在数据库事务内原子提交；普通API操作日志也不读取或记录管理请求体。
 
@@ -104,6 +112,6 @@ Web 列、搜索和表单使用这些能力；修改仅发送用户显式改动�
 
 ## 关系对象与现有 Web 入口
 
-角色管理的操作区继续在“菜单权限”右侧提供“字段权限”，沿用原有抽屉和页面规范。当前目录提供七对象的中英文名称、字段和用途；“默认推荐配置”“全部允许”“全部拒绝”操作候选草稿，预览只显示规则差异，不读取业务值。读取、查询、新增、修改、导入、导出按对象实际登记的用途配置；未实现的用途不能借自定义功能按钮获得字段授权。
+在系统管理 → 角色管理的角色行选择「权限配置」。用户列表的读取与查询在菜单树旁配置，窄屏显示在树下方。只有菜单管理权限的管理员可从角色行打开菜单编辑器。其他对象仍按目录登记的用途编辑候选草稿，「默认推荐配置」「全部允许」「全部拒绝」作用于相应规则。预览展示授权差异。自定义功能按钮使用服务端为该动作声明的字段用途。
 
 角色、部门和菜单的业务表单从当前受保护快照加载，支持稀疏修改、只写字段和脱敏替换；菜单、Agent、部门成员编辑器先证明完整集合再开放保存。角色状态/数据范围、菜单注册等专用动作仍沿用原授权协议。接口、来源与限制见[关系对象读取](RELATION-FIELD-PROJECTION.md)。候选管理或受控准备成功不代表当前部署具备全系统生产激活资格。

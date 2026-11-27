@@ -30,7 +30,6 @@ from app.core.exceptions import (
     DuplicateException,
     NotFoundException,
 )
-from app.core.field_policy import resolve_fields
 from app.core.field_policy.contracts import denied
 from app.core.id_generator import next_id
 from app.core.security import decrypt_value, encrypt_value
@@ -41,7 +40,6 @@ from app.modules.system.field_policy.control_catalog import (
     CREATE,
     IMPORT_CREATE,
     IMPORT_MATCH,
-    READ,
     UPDATE,
 )
 from app.modules.system.field_policy.control_values import (
@@ -723,17 +721,8 @@ class ConfigurationAuthorizationCandidate:
             db, tx, context, mode="update", target_id=target_id
         )
         record = context.record("system.config", target_id, context.scopes)
-        for access in (READ,) if operation == "config.revoke" else (READ, UPDATE):
-            decisions = resolve_fields(
-                context.catalog, context.rules, record, action, access
-            )
-            required = {
-                use.ref.field_id
-                for use in context.catalog.actions[action].uses
-                if use.access == access
-            }
-            if any(not decisions[name].allowed for name in required):
-                raise denied()
+        if not context.can_confirm_publication(record, action):
+            raise denied()
         require_publication_revision(
             payload["expected_revision"],
             observed,

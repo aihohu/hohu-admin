@@ -4,6 +4,7 @@ import re
 from datetime import UTC, datetime
 
 from app.core.exceptions import BusinessException
+from app.core.field_policy.console_origin import console_authority
 from app.core.field_policy.documents import catalog_parts, read_json
 from app.core.field_policy.qualification import read_server_qualification
 from app.core.process_identity import ProcessIdentity
@@ -47,11 +48,19 @@ def require_normal_resume(guard, *, required=False):
             "migration",
             "completion",
         }
+        version = record.get("schema_version") if type(record) is dict else None
+        if version == 4:
+            keys.add("console_origin")
+            console_authority(record["console_origin"])
+            if not re.fullmatch(
+                r"[0-9a-f]{40}", record["web_commit"]
+            ) or not re.fullmatch(r"[0-9a-f]{64}", record["web_manifest_digest"]):
+                raise _blocked()
         if (
             type(record) is not dict
             or set(record) != keys
             or type(record["schema_version"]) is not int
-            or record["schema_version"] != 3
+            or version not in (3, 4)
             or record["state"] != "qualified-stopped"
         ):
             raise _blocked()

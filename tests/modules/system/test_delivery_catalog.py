@@ -12,7 +12,12 @@ from app.core.field_policy import (
     resolve_fields,
 )
 from app.modules.ai.agents.tools.registry import ToolRegistry
-from app.modules.system.field_policy.delivery_catalog import delivery_catalog
+from app.modules.system.field_policy.delivery_catalog import (
+    SORT,
+    delivery_catalog,
+    previous_delivery_catalog,
+    user_list_catalog,
+)
 from app.modules.system.field_policy.ordinary_catalog import production_catalog
 from app.modules.system.field_policy.transfer_catalog import READ, transfer_catalog
 
@@ -23,15 +28,41 @@ def delivery():
 
 
 def test_delivery_catalog_preserves_exact_fourteen_object_source():
-    old, new = transfer_catalog(), delivery()
+    old, new = transfer_catalog(), previous_delivery_catalog()
     assert len(old.objects) == 14 and len(new.objects) == 23
-    assert production_catalog().digest == new.digest
     for key, obj in old.objects.items():
         for old_field in obj.fields:
             current = new.fields[FieldRef(key, old_field.field_id)]
             assert set(old_field.accesses) <= set(current.accesses)
             assert replace(current, accesses=old_field.accesses) == old_field
     assert all(new.actions[key] == action for key, action in old.actions.items())
+
+
+def test_current_catalog_adds_phone_sort_only_for_the_user_list():
+    previous, current = previous_delivery_catalog(), user_list_catalog()
+    phone = FieldRef("system.user", "user_phone")
+    assert SORT not in previous.fields[phone].accesses
+    assert SORT in current.fields[phone].accesses
+    assert set(current.actions) == set(previous.actions)
+    assert {
+        name
+        for name in current.actions
+        if current.actions[name] != previous.actions[name]
+    } == {"user.list-read"}
+
+
+def test_publication_changes_only_the_action_and_keeps_its_read_footprint():
+    previous, current = user_list_catalog(), production_catalog()
+    assert previous.objects == current.objects
+    assert previous.actions.keys() == current.actions.keys()
+    assert {
+        k for k in current.actions if previous.actions[k] != current.actions[k]
+    } == {"config.publish"}
+    action = current.actions["config.publish"]
+    assert action.permission_codes == ("system:config:publish",)
+    assert action.uses == tuple(
+        u for u in previous.actions[action.action_id].uses if u.access == READ
+    )
 
 
 @pytest.mark.parametrize(

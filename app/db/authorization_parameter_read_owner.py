@@ -25,7 +25,6 @@ from app.modules.system.field_policy.control_catalog import (
     EQ,
     EXPORT,
     READ,
-    UPDATE,
 )
 from app.modules.system.models.config import Config
 from app.modules.system.models.config_publication import ConfigPublication
@@ -354,7 +353,12 @@ class ParameterReadOwner:
         permission = (
             "system:" + surface + (":add" if query.mode == "create" else ":edit")
         )
-        if permission not in context.permissions:
+        publisher = (
+            surface == "config"
+            and query.mode == "update"
+            and "system:config:publish" in context.permissions
+        )
+        if permission not in context.permissions and not publisher:
             raise AuthorizationException(
                 "缺少操作权限", error_code="MISSING_PERMISSION"
             )
@@ -389,11 +393,7 @@ class ParameterReadOwner:
             ),
             "formReceipt": issue_receipt(facts),
         }
-        if (
-            surface == "config"
-            and target is not None
-            and "system:config:publish" in context.permissions
-        ):
+        if publisher and target is not None:
             with authorization_read_phase(db, "projection"):
                 metadata = (
                     await parameter_rows(
@@ -423,21 +423,12 @@ class ParameterReadOwner:
                 kind="revoke",
             )
         if (
-            surface == "config"
+            publisher
             and target is not None
-            and "system:config:publish" in context.permissions
             and "config_value" in values
             and values.get("config_type") == "text"
             and values.get("status") == "1"
-            and all(
-                {
-                    use.ref.field_id
-                    for use in context.catalog.actions["config.publish"].uses
-                    if use.access == access
-                }
-                <= set(context.allowed(source, "config.publish", access))
-                for access in (READ, UPDATE)
-            )
+            and context.can_confirm_publication(source, "config.publish")
         ):
             with authorization_read_phase(db, "projection"):
                 rows = await parameter_rows(
@@ -446,21 +437,9 @@ class ParameterReadOwner:
                     tenant.tenant_id,
                     predicates=(Config.config_id == target,),
                 )
-                publication = (
-                    (
-                        await db.execute(
-                            select(ConfigPublication.__table__).where(
-                                ConfigPublication.tenant_id == tenant.tenant_id,
-                                ConfigPublication.config_id == target,
-                            )
-                        )
-                    )
-                    .mappings()
-                    .one_or_none()
-                )
             current = next(row for row in rows if row["config_id"] == target)
             result["publicationRevision"] = publication_revision(
-                facts, current, dict(publication) if publication else None
+                facts, current, dict(prior) if prior else None
             )
         return result
 

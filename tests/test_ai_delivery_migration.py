@@ -9,6 +9,14 @@ from tests.test_release_migration_roundtrip import (
 )
 
 
+def delivery_chain():
+    steps = release_chain()
+    boundary = next(
+        i for i, step in enumerate(steps) if step.revision == "e020f3b00001"
+    )
+    return steps[: boundary + 1]
+
+
 async def seed_title(db, chain):
     await db.run_sync(apply_steps, chain, "upgrade")
     await db.execute(
@@ -27,7 +35,7 @@ async def test_unknown_title_upgrade_and_empty_provenance_roundtrip(
     migration_connection,
 ):
     db = migration_connection
-    chain = release_chain()
+    chain = delivery_chain()
     await seed_title(db, chain[:-1])
     await db.run_sync(apply_steps, chain[-1:], "upgrade")
     assert (
@@ -66,7 +74,7 @@ async def test_unknown_title_upgrade_and_empty_provenance_roundtrip(
 @pytest.mark.parametrize("origin", ["authored", "fixed"])
 async def test_authored_title_prevents_downgrade(migration_connection, origin):
     db = migration_connection
-    chain = release_chain()
+    chain = delivery_chain()
     await seed_title(db, chain)
     await db.execute(
         text(
